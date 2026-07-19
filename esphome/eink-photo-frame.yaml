@@ -1,0 +1,110 @@
+####################################################
+## Eink Photo Frame - Seeed reTerminal E1002
+##
+## Shows a random favorited photo from a self-hosted PhotoPrism instance,
+## via the photo-frame-bridge container (../photo-frame-bridge) which
+## picks the random photo and pre-dithers it to the panel's 6-color
+## Spectra 6 palette on every request.
+##
+## Based on the "Seeed reTerminal Art Display" config by Guy Sie
+## (https://github.com/GuySie/random-things), which itself builds on
+## work by Paul Krischer (https://github.com/SqyD) using the epaper_spi
+## component + LVGL. Simplified here: no numbered-file browsing, no
+## deep sleep (device is USB powered) - the bridge already returns a
+## different random photo on every fetch, so we just re-download on a
+## timer.
+####################################################
+
+esphome:
+  name: eink-photo-frame
+  friendly_name: Eink Photo Frame
+  min_version: 2025.11.1
+  on_boot:
+    - priority: -100
+      then:
+        # Extra time for the display to finish initializing (needed since ESPHome 2025.11)
+        - delay: 5000ms
+        - component.update: photo_image
+
+esp32:
+  board: esp32-s3-devkitc-1
+  framework:
+    type: esp-idf
+
+psram:
+  mode: octal
+  speed: 80MHz
+
+logger:
+
+api:
+  encryption:
+    key: !secret eink_photo_frame_api_key
+
+ota:
+  - platform: esphome
+    password: !secret eink_photo_frame_ota_password
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+  # Fallback hotspot (captive portal) if WiFi connection fails
+  ap:
+    ssid: "Eink-Photo-Frame Fallback"
+    password: !secret eink_photo_frame_ap_password
+
+captive_portal:
+
+http_request:
+
+spi:
+  clk_pin: GPIO7
+  mosi_pin: GPIO9
+
+# Green button: press to fetch a new random photo on demand
+binary_sensor:
+  - platform: gpio
+    pin:
+      number: GPIO3
+      mode: INPUT_PULLUP
+      inverted: true
+    id: button_green
+    name: "Refresh Photo"
+    on_press:
+      then:
+        - logger.log: "Green button pressed - fetching new photo"
+        - component.update: photo_image
+
+display:
+  - platform: epaper_spi
+    id: epaper_display
+    model: Seeed-reTerminal-E1002
+    update_interval: never
+    auto_clear_enabled: false
+
+lvgl:
+  buffer_size: 12%
+  pages:
+    - id: main_page
+      widgets:
+        - image:
+            align: CENTER
+            id: art
+            src: photo_image
+
+# Bridge container on the NAS: random favorited photo from PhotoPrism,
+# already cropped to 800x480 and pre-dithered to the panel's 6-color palette.
+online_image:
+  - id: photo_image
+    url: "http://192.168.68.61:8090/frame.png"
+    type: RGB565
+    format: PNG
+    update_interval: 20min
+    on_download_finished:
+      - lvgl.image.update:
+          id: art
+          src: photo_image
+      - component.update: epaper_display
+    on_error:
+      - logger.log: "Failed to download photo from bridge"
