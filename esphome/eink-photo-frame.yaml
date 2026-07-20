@@ -9,8 +9,8 @@
 ## a plain image - keeps the device side simple, no JSON parsing).
 ##
 ## Buttons:
-##   Green (GPIO3):  fetch a new random photo on demand
-##   White (GPIO4):  switch to the slideshow page
+##   Green (GPIO3):  slideshow page if not already there, else fetch a new photo
+##   White (GPIO4):  unassigned - reserved for a future page (e.g. weather)
 ##   White (GPIO5):  switch to the stats page (fetches fresh numbers)
 ##
 ## Based on the "Seeed reTerminal Art Display" config by Guy Sie
@@ -87,39 +87,59 @@ script:
       # component.update() itself returns immediately and doesn't block.
       - delay: 35s
 
+# Tracks which LVGL page is currently active (0 = slideshow, 1 = stats), so the
+# green button can decide "switch to slideshow" vs "fetch a new photo" without
+# ESPHome/LVGL exposing a way to query the active page directly.
+globals:
+  - id: current_page
+    type: int
+    initial_value: '0'
+
 binary_sensor:
-  # Green button: fetch a new random photo on demand
+  # Green button: go to the slideshow page if not already there; if already
+  # there, fetch a new random photo instead (the two most useful actions
+  # collapsed onto one button, since a dedicated "show slideshow" button was
+  # redundant once this one covers the same case).
   - platform: gpio
     pin:
       number: GPIO3
       mode: INPUT_PULLUP
       inverted: true
     id: button_green
-    name: "Refresh Photo"
+    name: "Slideshow / Refresh"
     filters:
       - delayed_on: 30ms
       - delayed_off: 30ms
     on_press:
       then:
-        - logger.log: "Green button pressed - fetching new photo"
-        - component.update: photo_image
+        - if:
+            condition:
+              lambda: "return id(current_page) != 0;"
+            then:
+              - logger.log: "Green button pressed - returning to slideshow"
+              - globals.set:
+                  id: current_page
+                  value: "0"
+              - lvgl.page.show: main_page
+              - script.execute: refresh_display
+            else:
+              - logger.log: "Green button pressed - fetching new photo"
+              - component.update: photo_image
 
-  # White button: switch to the slideshow page
+  # White button: unassigned for now (reserved for a future page)
   - platform: gpio
     pin:
       number: GPIO4
       mode: INPUT_PULLUP
       inverted: true
     id: button_white_1
-    name: "Show Slideshow"
+    name: "White Button 1"
     filters:
       - delayed_on: 30ms
       - delayed_off: 30ms
     on_press:
       then:
-        - logger.log: "Switching to slideshow page"
-        - lvgl.page.show: main_page
-        - script.execute: refresh_display
+        - logger.log: "White button 1 pressed - no action assigned yet"
 
   # White button: switch to the library stats page (fetches fresh numbers)
   - platform: gpio
@@ -135,6 +155,9 @@ binary_sensor:
     on_press:
       then:
         - logger.log: "Switching to stats page - fetching fresh numbers"
+        - globals.set:
+            id: current_page
+            value: "1"
         - component.update: stats_image
 
 display:

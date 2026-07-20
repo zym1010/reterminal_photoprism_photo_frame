@@ -11,9 +11,15 @@ parsing or native text widgets:
 
 | Button | Pin | Action |
 |--------|-----|--------|
-| Green  | GPIO3 | Fetch a new random photo on demand (stays on whichever page is active) |
-| White  | GPIO4 | Switch to the slideshow page |
+| Green  | GPIO3 | Slideshow page if not already there; if already there, fetch a new random photo |
+| White  | GPIO4 | Unassigned - reserved for a future page |
 | White  | GPIO5 | Switch to the stats page, fetching fresh numbers first |
+
+The green button's two behaviors are collapsed onto one button because they're mutually
+exclusive in practice: there's no reason to "go to slideshow" while already on it, so that press
+is repurposed to mean "refresh" instead. A `current_page` global tracks which page is active
+(0 = slideshow, 1 = stats) since ESPHome/LVGL doesn't expose a way to query the active page
+directly - update it if you add more pages.
 
 The stats page has no periodic `update_interval` - it only fetches when you press GPIO5, so
 viewing the slideshow never triggers an unrelated background refresh/flash. Physical left/right
@@ -21,9 +27,10 @@ for the two white buttons may be swapped from what's listed here depending on th
 GPIO4/GPIO5 pin numbers in the YAML if so.
 
 Pressing GPIO5 (stats) does two things in sequence: it downloads `/stats.png` from the bridge
-(a second or two), *then* pushes the result to the panel. Pressing GPIO4 (slideshow) just pushes
-whatever photo is already loaded - no network round-trip - so it responds faster than the stats
-button.
+(a second or two), *then* pushes the result to the panel. Pressing the green button while already
+on the slideshow does the same (fetch, then push) for `/frame.png`; pressing it from the stats
+page just pushes the slideshow's already-loaded photo - no network round-trip, so it responds
+faster.
 
 ## A note on the panel's refresh speed
 
