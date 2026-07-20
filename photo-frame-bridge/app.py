@@ -2,11 +2,12 @@ import io
 import logging
 import os
 import random
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
+import pillow_avif  # noqa: F401  (registers AVIF support with Pillow on import)
 import requests
 from epaper_dithering import ColorPalette, DitherMode, dither_image
-from flask import Flask, Response, abort
+from flask import Flask, Response, abort, request
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 PHOTOPRISM_URL = os.environ.get("PHOTOPRISM_URL", "http://192.168.68.61:12342").rstrip("/")
@@ -15,7 +16,17 @@ HEIGHT = int(os.environ.get("HEIGHT", "480"))
 FAVORITES_ONLY = os.environ.get("FAVORITES_ONLY", "true").lower() != "false"
 THUMB_SIZE = os.environ.get("THUMB_SIZE", "fit_1920")
 CANDIDATE_COUNT = int(os.environ.get("CANDIDATE_COUNT", "25"))
+# Mounted on the NAS side: each immediate subfolder becomes an additional photo
+# source, discovered fresh on every request - drop a new folder in, no redeploy
+# needed. "photoprism" (PhotoPrism favorites) is always source 0.
+ADHOC_IMAGES_DIR = os.environ.get("ADHOC_IMAGES_DIR", "/data/adhoc_images")
+LOCAL_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".avif", ".bmp", ".tiff", ".heic", ".heif"}
 REQUEST_TIMEOUT = 15
+
+# Dashboard sources are code (each needs its own fetch+render logic), unlike photo
+# sources which are just folders - adding one later means adding a branch in
+# render_dashboard_image() below and appending here.
+DASHBOARD_SOURCES = ["weather", "stats"]
 
 # The reTerminal E1002's epaper_spi driver does NOT do nearest-color matching
 # against a rich/measured palette. It classifies each pixel into one of 8 RGB-cube
@@ -92,6 +103,20 @@ def render_to_png(img):
     return buf.getvalue()
 
 
+def list_photo_sources():
+    """"photoprism" plus every immediate subfolder of ADHOC_IMAGES_DIR, sorted."""
+    sources = ["photoprism"]
+    if os.path.isdir(ADHOC_IMAGES_DIR):
+        sources.extend(
+            sorted(
+                name
+                for name in os.listdir(ADHOC_IMAGES_DIR)
+                if os.path.isdir(os.path.join(ADHOC_IMAGES_DIR, name))
+            )
+        )
+    return sources
+
+
 def pick_random_jpeg_photo():
     params = {"count": CANDIDATE_COUNT, "order": "random"}
     if FAVORITES_ONLY:
@@ -113,12 +138,65 @@ def fetch_and_process(photo):
     return render_to_png(fitted)
 
 
+def pick_random_local_image(source):
+    folder = os.path.join(ADHOC_IMAGES_DIR, source)
+    try:
+        files = [f for f in os.listdir(folder) if os.path.splitext(f)[1].lower() in LOCAL_IMAGE_EXTENSIONS]
+    except OSError:
+        return None
+    return os.path.join(folder, random.choice(files)) if files else None
+
+
+def fetch_and_process_local(source):
+    path = pick_random_local_image(source)
+    if path is None:
+        return None
+    img = Image.open(path)
+    img = ImageOps.exif_transpose(img).convert("RGB")
+    fitted = ImageOps.fit(img, (WIDTH, HEIGHT), method=Image.LANCZOS, centering=(0.5, 0.5))
+    return render_to_png(fitted)
+
+
+def render_photo_image(index):
+    """Dispatch to the photo source at `index` (wrapping around the current source
+    list), returning (source_name, png_bytes) or (source_name, None) if empty."""
+    sources = list_photo_sources()
+    source = sources[index % len(sources)]
+    if source == "photoprism":
+        photo = pick_random_jpeg_photo()
+        if photo is None:
+            return source, None
+        return source, fetch_and_process(photo)
+    return source, fetch_and_process_local(source)
+
+
+def fetch_added_count(since_days):
+    """Count of items added (imported) in the last `since_days` days.
+
+    PhotoPrism's search syntax has an undocumented `added:"<RFC3339>"` filter meaning
+    "added at or after this timestamp" - not in the official docs, but confirmed via
+    photoprism/photoprism#4300. Response count comes from the `X-Count` header, which
+    only reflects the *true* total once the requested `count` exceeds it - a large
+    `count` here is still cheap because personal libraries only add a handful of items
+    in any given week/month, so the actual response body stays small regardless.
+    """
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=since_days)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    resp = requests.get(
+        f"{PHOTOPRISM_URL}/api/v1/photos",
+        params={"count": 20000, "q": f'added:"{cutoff}"'},
+        timeout=REQUEST_TIMEOUT,
+    )
+    resp.raise_for_status()
+    return int(resp.headers.get("X-Count", len(resp.json())))
+
+
 def fetch_library_stats():
-    """Cheap aggregate counts from /config, plus the most recently added item's timestamp.
+    """Cheap aggregate counts from /config, the most recently added item's timestamp,
+    and how many items were added in the last 7/15/30 days.
 
     Avoids paging through the whole library just to count it - /api/v1/config already
-    carries a precomputed `count` object, and the "last added" timestamp only needs a
-    single count=1 request against /api/v1/photos (order=added), not the whole library.
+    carries a precomputed `count` object, and everything else here is either a single
+    count=1 request or relies on the X-Count header trick above.
     """
     config_resp = requests.get(f"{PHOTOPRISM_URL}/api/v1/config", timeout=REQUEST_TIMEOUT)
     config_resp.raise_for_status()
@@ -133,7 +211,9 @@ def fetch_library_stats():
     latest = latest_resp.json()
     last_added = latest[0]["CreatedAt"] if latest else None
 
-    return counts, last_added
+    added_recent = {days: fetch_added_count(days) for days in (30, 60, 90)}
+
+    return counts, last_added, added_recent
 
 
 def format_last_added(iso_ts):
@@ -150,7 +230,7 @@ def format_last_added(iso_ts):
     return f"{dt.strftime('%Y-%m-%d %H:%M UTC')} ({rel})"
 
 
-def render_stats_image(counts, last_added):
+def render_stats_image(counts, last_added, added_recent):
     img = Image.new("RGB", (WIDTH, HEIGHT), (255, 255, 255))
     draw = ImageDraw.Draw(img)
     title_font = ImageFont.load_default(size=44)
@@ -160,13 +240,15 @@ def render_stats_image(counts, last_added):
     draw.text((margin, margin), "PhotoPrism Library", font=title_font, fill=(0, 0, 0))
     draw.line((margin, margin + 60, WIDTH - margin, margin + 60), fill=(0, 0, 0), width=2)
 
+    # photos/live/videos are mutually exclusive categories that sum to count.all,
+    # so Photos+Live Photos is a plain sum, not double-counting anything.
     rows = [
-        ("Photos", counts.get("photos")),
+        ("Photos", counts.get("photos", 0) + counts.get("live", 0)),
         ("Videos", counts.get("videos")),
-        ("Live Photos", counts.get("live")),
         ("Favorites", counts.get("favorites")),
-        ("Places", counts.get("places")),
-        ("Cameras", counts.get("cameras")),
+        ("Added (30 days)", added_recent.get(30)),
+        ("Added (60 days)", added_recent.get(60)),
+        ("Added (90 days)", added_recent.get(90)),
         ("Last Added", format_last_added(last_added)),
     ]
 
@@ -240,47 +322,41 @@ def render_weather_image(results):
     return img
 
 
-@app.route("/frame.png")
-def frame():
-    photo = pick_random_jpeg_photo()
-    if photo is None:
-        log.warning("No matching JPEG photos found (favorites_only=%s)", FAVORITES_ONLY)
-        abort(503, description="No matching photos available")
-    try:
-        png_bytes = fetch_and_process(photo)
-    except Exception:
-        log.exception("Failed to fetch/process photo %s", photo.get("Hash"))
-        abort(502, description="Failed to fetch/process photo")
-    log.info("Serving photo %s (%s)", photo.get("Hash"), photo.get("Title"))
-    return Response(png_bytes, mimetype="image/png", headers={"Cache-Control": "no-store"})
-
-
-@app.route("/stats.png")
-def stats():
-    try:
-        counts, last_added = fetch_library_stats()
-        png_bytes = render_to_png(render_stats_image(counts, last_added))
-    except Exception:
-        log.exception("Failed to fetch/render library stats")
-        abort(502, description="Failed to fetch/render library stats")
-    log.info(
-        "Serving stats: %s photos, %s videos, %s favorites",
-        counts.get("photos"),
-        counts.get("videos"),
-        counts.get("favorites"),
-    )
-    return Response(png_bytes, mimetype="image/png", headers={"Cache-Control": "no-store"})
-
-
-@app.route("/weather.png")
-def weather():
-    try:
+def render_dashboard_image(index):
+    """Dispatch to the dashboard source at `index` (wrapping around DASHBOARD_SOURCES)."""
+    source = DASHBOARD_SOURCES[index % len(DASHBOARD_SOURCES)]
+    if source == "weather":
         results = [fetch_weather(name, lat, lon) for name, lat, lon in WEATHER_LOCATIONS]
-        png_bytes = render_to_png(render_weather_image(results))
+        return source, render_weather_image(results)
+    counts, last_added, added_recent = fetch_library_stats()
+    return source, render_stats_image(counts, last_added, added_recent)
+
+
+@app.route("/photo.png")
+def photo():
+    index = request.args.get("index", 0, type=int) or 0
+    try:
+        source, img = render_photo_image(index)
     except Exception:
-        log.exception("Failed to fetch/render weather")
-        abort(502, description="Failed to fetch/render weather")
-    log.info("Serving weather for %s", ", ".join(r["name"] for r in results))
+        log.exception("Failed to fetch/process photo (index=%s)", index)
+        abort(502, description="Failed to fetch/process photo")
+    if img is None:
+        log.warning("Photo source %r had no usable images (index=%s)", source, index)
+        abort(503, description=f"No images available from source {source!r}")
+    log.info("Serving photo from source %r (index=%s)", source, index)
+    return Response(img, mimetype="image/png", headers={"Cache-Control": "no-store"})
+
+
+@app.route("/dashboard.png")
+def dashboard():
+    index = request.args.get("index", 0, type=int) or 0
+    try:
+        source, img = render_dashboard_image(index)
+        png_bytes = render_to_png(img)
+    except Exception:
+        log.exception("Failed to fetch/render dashboard (index=%s)", index)
+        abort(502, description="Failed to fetch/render dashboard")
+    log.info("Serving dashboard source %r (index=%s)", source, index)
     return Response(png_bytes, mimetype="image/png", headers={"Cache-Control": "no-store"})
 
 

@@ -1,27 +1,45 @@
 ####################################################
 ## Eink Photo Frame - Seeed reTerminal E1002
 ##
-## Shows a random favorited photo from a self-hosted PhotoPrism instance,
-## via the photo-frame-bridge container (../photo-frame-bridge) which
-## picks the random photo and pre-dithers it to the panel's 6-color
-## Spectra 6 palette on every request. Three LVGL pages: a slideshow page,
-## a PhotoPrism library stats page, and a weather page - the latter two
-## also rendered by the bridge as plain images, keeping the device side
-## simple (no on-device JSON parsing or native text widgets).
+## Two LVGL pages, each bound to a single online_image whose URL is rewritten
+## at runtime (via online_image.set_url) to select a "source" by index:
+##
+##   Photo page:      GET /photo.png?index=N     -> photo-frame-bridge picks
+##                     sources[N % len(sources)] server-side. Source list is
+##                     ["photoprism"] + every subfolder of the bridge's
+##                     adhoc_images mount, discovered fresh on every request -
+##                     drop a new folder on the NAS and it's a source, no
+##                     firmware change needed.
+##   Dashboard page:   GET /dashboard.png?index=N -> same idea, but the
+##                     source list ("weather", "stats", ...) is fixed in the
+##                     bridge's code, since each dashboard type needs its own
+##                     fetch/render logic (unlike photo folders, which are
+##                     pure data).
+##
+## The device never needs to know how many sources exist in either category:
+## it just increments its own counter on every button press and lets the
+## bridge do `index % current_count` - so the bridge can grow either list
+## over time without ever touching this file.
 ##
 ## Buttons:
-##   Green (GPIO3):  slideshow page if not already there, else fetch a new photo
-##   White (GPIO4):  switch to the weather page (fetches fresh forecast)
-##   White (GPIO5):  switch to the stats page (fetches fresh numbers)
+##   Green (GPIO3):  refresh whatever's currently showing (new random photo
+##                   if on the photo page, fresh data if on the dashboard
+##                   page) - same source, no cycling.
+##   White (GPIO4):  cycle to the next dashboard source
+##   White (GPIO5):  cycle to the next photo source
+## Physical left/right for the two white buttons may be swapped depending on
+## the unit - swap the GPIO4/GPIO5 pin numbers below if so.
 ##
 ## Based on the "Seeed reTerminal Art Display" config by Guy Sie
-## (https://github.com/GuySie/random-things), which itself builds on
-## work by Paul Krischer (https://github.com/SqyD) using the epaper_spi
-## component + LVGL. Simplified here: no numbered-file browsing, no
-## deep sleep (device is USB powered) - the bridge already returns a
-## different random photo on every fetch, so we just re-download on a
-## timer.
+## (https://github.com/GuySie/random-things), which itself builds on work by
+## Paul Krischer (https://github.com/SqyD) using the epaper_spi component +
+## LVGL, including the online_image.set_url pattern used here for dynamic
+## URLs. Simplified/adapted for this project: no numbered-file browsing, no
+## deep sleep (device is USB powered).
 ####################################################
+
+substitutions:
+  bridge_url: "http://192.168.68.61:8090"
 
 esphome:
   name: eink-photo-frame
@@ -88,26 +106,33 @@ script:
       # component.update() itself returns immediately and doesn't block.
       - delay: 35s
 
-# Tracks which LVGL page is currently active (0 = slideshow, 1 = stats), so the
-# green button can decide "switch to slideshow" vs "fetch a new photo" without
-# ESPHome/LVGL exposing a way to query the active page directly.
 globals:
-  - id: current_page
+  # Which page is currently active: 0 = photo, 1 = dashboard. Drives what the
+  # green button's "refresh" means.
+  - id: current_mode
+    type: int
+    initial_value: '0'
+  # Monotonically increasing counters, one per category. Never reset/wrapped
+  # on-device - the bridge does `index % current_source_count` server-side, so
+  # these just need to keep changing on each press, not track an exact source.
+  - id: photo_index
+    type: int
+    initial_value: '0'
+  - id: dashboard_index
     type: int
     initial_value: '0'
 
 binary_sensor:
-  # Green button: go to the slideshow page if not already there; if already
-  # there, fetch a new random photo instead (the two most useful actions
-  # collapsed onto one button, since a dedicated "show slideshow" button was
-  # redundant once this one covers the same case).
+  # Green button: refresh whatever's currently showing, using its own source's
+  # rules (new random photo for the photo page, fresh data for the dashboard
+  # page) - never changes source/page.
   - platform: gpio
     pin:
       number: GPIO3
       mode: INPUT_PULLUP
       inverted: true
     id: button_green
-    name: "Slideshow / Refresh"
+    name: "Refresh"
     filters:
       - delayed_on: 30ms
       - delayed_off: 30ms
@@ -115,55 +140,69 @@ binary_sensor:
       then:
         - if:
             condition:
-              lambda: "return id(current_page) != 0;"
+              lambda: "return id(current_mode) == 0;"
             then:
-              - logger.log: "Green button pressed - returning to slideshow"
-              - globals.set:
-                  id: current_page
-                  value: "0"
-              - lvgl.page.show: main_page
-              - script.execute: refresh_display
-            else:
-              - logger.log: "Green button pressed - fetching new photo"
+              - logger.log: "Green button pressed - fetching a new photo from the current source"
               - component.update: photo_image
+            else:
+              - logger.log: "Green button pressed - refreshing the current dashboard source"
+              - component.update: dashboard_image
 
-  # White button: switch to the weather page (fetches fresh forecast)
+  # White button: cycle to the next dashboard source
   - platform: gpio
     pin:
       number: GPIO4
       mode: INPUT_PULLUP
       inverted: true
     id: button_white_1
-    name: "Show Weather"
+    name: "Next Dashboard Source"
     filters:
       - delayed_on: 30ms
       - delayed_off: 30ms
     on_press:
       then:
-        - logger.log: "Switching to weather page - fetching fresh forecast"
         - globals.set:
-            id: current_page
-            value: "2"
-        - component.update: weather_image
+            id: current_mode
+            value: "1"
+        - globals.set:
+            id: dashboard_index
+            value: !lambda "return id(dashboard_index) + 1;"
+        - logger.log:
+            format: "Dashboard button pressed - cycling to index %d"
+            args: [id(dashboard_index)]
+        - online_image.set_url:
+            id: dashboard_image
+            url: !lambda |-
+              return "${bridge_url}/dashboard.png?index=" + std::to_string(id(dashboard_index));
+        - component.update: dashboard_image
 
-  # White button: switch to the library stats page (fetches fresh numbers)
+  # White button: cycle to the next photo source
   - platform: gpio
     pin:
       number: GPIO5
       mode: INPUT_PULLUP
       inverted: true
     id: button_white_2
-    name: "Show Stats"
+    name: "Next Photo Source"
     filters:
       - delayed_on: 30ms
       - delayed_off: 30ms
     on_press:
       then:
-        - logger.log: "Switching to stats page - fetching fresh numbers"
         - globals.set:
-            id: current_page
-            value: "1"
-        - component.update: stats_image
+            id: current_mode
+            value: "0"
+        - globals.set:
+            id: photo_index
+            value: !lambda "return id(photo_index) + 1;"
+        - logger.log:
+            format: "Photo button pressed - cycling to index %d"
+            args: [id(photo_index)]
+        - online_image.set_url:
+            id: photo_image
+            url: !lambda |-
+              return "${bridge_url}/photo.png?index=" + std::to_string(id(photo_index));
+        - component.update: photo_image
 
 display:
   - platform: epaper_spi
@@ -175,76 +214,51 @@ display:
 lvgl:
   buffer_size: 12%
   pages:
-    - id: main_page
+    - id: photo_page
       widgets:
         - image:
             align: CENTER
-            id: art
+            id: photo_art
             src: photo_image
-    - id: stats_page
+    - id: dashboard_page
       widgets:
         - image:
             align: CENTER
-            id: stats_art
-            src: stats_image
-    - id: weather_page
-      widgets:
-        - image:
-            align: CENTER
-            id: weather_art
-            src: weather_image
+            id: dashboard_art
+            src: dashboard_image
 
-# Bridge container on the NAS: random favorited photo from PhotoPrism,
-# already cropped to 800x480 and pre-dithered to the panel's 6-color palette.
 image:
+  # Photo sources: PhotoPrism favorites plus every subfolder of the bridge's
+  # adhoc_images mount. Starts on index 0 (PhotoPrism) at boot.
   - platform: online_image
     id: photo_image
-    url: "http://192.168.68.61:8090/frame.png"
+    url: "${bridge_url}/photo.png?index=0"
     type: RGB565
     format: PNG
     update_interval: 20min
     on_download_finished:
       - lvgl.image.update:
-          id: art
+          id: photo_art
           src: photo_image
+      - lvgl.page.show: photo_page
       - script.execute: refresh_display
     on_error:
       - logger.log: "Failed to download photo from bridge"
 
-  # PhotoPrism library stats, rendered as an image by the bridge (same 800x480,
-  # same 6-color pipeline). Fetched on demand only (see button_white_2 above) -
-  # no periodic update_interval, so viewing the slideshow never triggers an
-  # unrelated stats refresh/flash in the background.
+  # Dashboard sources (weather, PhotoPrism stats, ...). Fetched on demand only
+  # (see button_white_1 above) - no periodic update_interval, so viewing the
+  # photo page never triggers an unrelated dashboard refresh/flash.
   - platform: online_image
-    id: stats_image
-    url: "http://192.168.68.61:8090/stats.png"
+    id: dashboard_image
+    url: "${bridge_url}/dashboard.png?index=0"
     type: RGB565
     format: PNG
     update_interval: never
     on_download_finished:
       - lvgl.image.update:
-          id: stats_art
-          src: stats_image
-      - lvgl.page.show: stats_page
+          id: dashboard_art
+          src: dashboard_image
+      - lvgl.page.show: dashboard_page
       - script.execute: refresh_display
     on_error:
-      - logger.log: "Failed to download stats from bridge"
-
-  # Weather forecast for three fixed locations, rendered as an image by the
-  # bridge (using Open-Meteo - the one non-self-hosted piece of this project,
-  # since a real forecast needs an external data source). Fetched on demand
-  # only, same reasoning as stats_image above.
-  - platform: online_image
-    id: weather_image
-    url: "http://192.168.68.61:8090/weather.png"
-    type: RGB565
-    format: PNG
-    update_interval: never
-    on_download_finished:
-      - lvgl.image.update:
-          id: weather_art
-          src: weather_image
-      - lvgl.page.show: weather_page
-      - script.execute: refresh_display
-    on_error:
-      - logger.log: "Failed to download weather from bridge"
+      - logger.log: "Failed to download dashboard source from bridge"

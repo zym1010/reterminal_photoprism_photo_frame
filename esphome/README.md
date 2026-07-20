@@ -1,38 +1,45 @@
 # ESPHome firmware
 
-Firmware for the Seeed reTerminal E1002 (ESP32-S3, 7.3" Spectra 6 color e-paper). Three LVGL
-pages, all just full-screen images fetched from the `photo-frame-bridge` service - no on-device
-JSON parsing or native text widgets:
+Firmware for the Seeed reTerminal E1002 (ESP32-S3, 7.3" Spectra 6 color e-paper). Two LVGL pages,
+each just a full-screen image fetched from the `photo-frame-bridge` service - no on-device JSON
+parsing or native text widgets:
 
-- **Slideshow page** - a random photo, refreshing on a timer or on demand.
-- **Stats page** - a PhotoPrism library stats card (also rendered as an image, by the bridge).
-- **Weather page** - current conditions for a few fixed locations (also rendered as an image;
-  see `../photo-frame-bridge/README.md` for the source and why it's the one piece of this project
-  that isn't fully self-hosted).
+- **Photo page** - a random photo from whichever photo source is currently selected.
+- **Dashboard page** - weather or PhotoPrism library stats (also rendered as images, by the
+  bridge; see `../photo-frame-bridge/README.md` for the weather source and why it's the one
+  piece of this project that isn't fully self-hosted).
+
+## How source selection works
+
+The bridge exposes `GET /photo.png?index=N` and `GET /dashboard.png?index=N`; the source shown
+is `sources[N % len(sources)]`, computed **server-side, fresh on every request**. The device
+never knows how many sources exist in either category - it just keeps two ever-increasing
+counters (`photo_index`, `dashboard_index`) and bumps one by 1 per relevant button press. The
+bridge does the wraparound using whatever its *current* source list is, so adding a source there
+(e.g. a new `adhoc_images` subfolder) never requires touching this firmware. See the bridge
+README for the full explanation.
+
+Each button press rewrites the relevant `online_image`'s URL at runtime via
+`online_image.set_url` (a lambda building `.../photo.png?index=<counter>`), then triggers a
+download.
 
 ## Buttons
 
 | Button | Pin | Action |
 |--------|-----|--------|
-| Green  | GPIO3 | Slideshow page if not already there; if already there, fetch a new random photo |
-| White  | GPIO4 | Switch to the weather page, fetching a fresh forecast first |
-| White  | GPIO5 | Switch to the stats page, fetching fresh numbers first |
+| Green  | GPIO3 | Refresh whatever's currently showing - new random photo if on the photo page, fresh data if on the dashboard page. Never changes source. |
+| White  | GPIO4 | Cycle to the next dashboard source |
+| White  | GPIO5 | Cycle to the next photo source |
 
-The green button's two behaviors are collapsed onto one button because they're mutually
-exclusive in practice: there's no reason to "go to slideshow" while already on it, so that press
-is repurposed to mean "refresh" instead. A `current_page` global tracks which page is active
-(0 = slideshow, 1 = stats, 2 = weather) since ESPHome/LVGL doesn't expose a way to query the
-active page directly - update it if you add more pages.
+A `current_mode` global (0 = photo, 1 = dashboard) tracks which category is active so the green
+button knows which image to refresh. Physical left/right for the two white buttons may be
+swapped from what's listed here depending on the unit; swap the GPIO4/GPIO5 pin numbers in the
+YAML if so.
 
-Both the stats and weather pages have no periodic `update_interval` - they only fetch when you
-press their button, so viewing the slideshow never triggers an unrelated background
-refresh/flash. Physical left/right for the two white buttons may be swapped from what's listed
-here depending on the unit; swap the GPIO4/GPIO5 pin numbers in the YAML if so.
-
-Pressing GPIO4 or GPIO5 does two things in sequence: downloads the relevant image from the bridge
-(a second or two), *then* pushes the result to the panel. Pressing the green button while already
-on the slideshow does the same (fetch, then push) for `/frame.png`; pressing it from another page
-just pushes the slideshow's already-loaded photo - no network round-trip, so it responds faster.
+Cycling (GPIO4/GPIO5) downloads the new source's image from the bridge (a second or two), *then*
+pushes the result to the panel. The green button does the same for the current source - except
+on the photo page, where "refresh" means a fresh random pick from the *same* source (not the next
+one).
 
 ## A note on the panel's refresh speed
 
@@ -48,28 +55,26 @@ firmware controls. It has two consequences worth knowing about:
   the YAML) that silently drops overlapping requests instead. In practice: if you press a button
   and nothing visibly happens, the panel was still finishing a previous refresh - wait about 30
   seconds and press again.
-- **This is why the stats page has no background timer** - a periodic stats refresh could
-  silently eat a button press that arrived during it, on a page you weren't even looking at.
-  Keeping it on-demand-only avoids that entirely.
+- **This is why the dashboard page has no background timer** - a periodic refresh could silently
+  eat a button press that arrived during it, on a page you weren't even looking at. Keeping it
+  on-demand-only avoids that entirely.
 
-If you want faster perceived response, the main lever is the photo slideshow's `update_interval`
+If you want faster perceived response, the main lever is the photo page's `update_interval`
 (currently `20min`) - a shorter interval means more frequent 30-second refresh windows where a
 button press might land and get dropped; a longer interval means fewer of them.
 
 Adapted from the ["Seeed reTerminal Art Display"](https://github.com/GuySie/random-things) config
 by Guy Sie (itself building on work by Paul Krischer), which uses the `epaper_spi` component +
-LVGL. Simplified for this project: no numbered-file browsing and no deep sleep (device is USB
-powered) - the bridge already returns a different random photo on every fetch, so the device just
-re-downloads the same URL on a timer.
+LVGL, including the `online_image.set_url` pattern used here for dynamic URLs. Simplified/adapted
+for this project: no numbered-file browsing, no deep sleep (device is USB powered).
 
 ## Setup
 
 1. Copy `secrets.yaml.example` to `secrets.yaml` and fill in your WiFi credentials. Generate your
    own random values for the API/OTA/AP passwords (commands included in the example file).
    `secrets.yaml` is gitignored - never commit it.
-2. Edit `eink-photo-frame.yaml` and update all three `image:` entries' `url` (`/frame.png`,
-   `/stats.png`, `/weather.png`) to point at your own `photo-frame-bridge` instance's LAN
-   address.
+2. Edit the `bridge_url` substitution at the top of `eink-photo-frame.yaml` to point at your own
+   `photo-frame-bridge` instance's LAN address (used to build both image URLs).
 3. Install ESPHome and flash over USB (first flash only - OTA works after that):
    ```bash
    python3 -m venv .esphome-venv

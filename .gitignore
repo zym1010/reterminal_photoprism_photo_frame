@@ -15,3 +15,7 @@ __pycache__/
 
 # macOS
 .DS_Store
+
+# Personal photos - local-only staging area for the adhoc_images bridge feature,
+# never belongs in the repo. Real copies live on the NAS (see photo-frame-bridge/README.md).
+kid_photos/
