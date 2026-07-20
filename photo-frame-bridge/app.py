@@ -145,12 +145,20 @@ def fetch_and_process(photo):
 
 
 def pick_random_local_image(source):
+    """Random image from anywhere under this source's folder, recursively.
+
+    The source is the immediate subfolder (e.g. "kid_photos"), but images can
+    live in nested sub-subfolders under it - those all still count as the same
+    source, just organized however you like on disk.
+    """
     folder = os.path.join(ADHOC_IMAGES_DIR, source)
-    try:
-        files = [f for f in os.listdir(folder) if os.path.splitext(f)[1].lower() in LOCAL_IMAGE_EXTENSIONS]
-    except OSError:
-        return None
-    return os.path.join(folder, random.choice(files)) if files else None
+    files = []
+    for dirpath, dirnames, filenames in os.walk(folder):
+        dirnames[:] = [d for d in dirnames if not d.startswith(("@", "#", "."))]
+        files.extend(
+            os.path.join(dirpath, f) for f in filenames if os.path.splitext(f)[1].lower() in LOCAL_IMAGE_EXTENSIONS
+        )
+    return random.choice(files) if files else None
 
 
 def fetch_and_process_local(source):

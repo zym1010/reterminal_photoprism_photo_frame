@@ -24,10 +24,13 @@ URLs get rewritten at runtime.
 ## Photo sources: PhotoPrism + `adhoc_images` subfolders
 
 `ADHOC_IMAGES_DIR` (default `/data/adhoc_images`) is meant to be a NAS shared folder mounted into
-the container. Every immediate subfolder becomes a photo source automatically - e.g. mount a
+the container. Every **immediate** subfolder becomes a photo source automatically - e.g. mount a
 shared folder containing a `kid_photos/` subfolder, and `kid_photos` shows up as source 1 (source
 0 is always `photoprism`) without touching any code. Adding a third source later is just: create
-another subfolder.
+another top-level subfolder. Within a source, images are picked recursively from any depth of
+further nesting (e.g. `kid_photos/2026/vacation/photo.jpg` counts as part of the `kid_photos`
+source, not a separate one) - organize each source's folder however you like on disk. NAS
+housekeeping folders (`@eaDir`, `#recycle`, dotfolders) are skipped at every level.
 
 Supported formats: JPEG, PNG, WEBP, AVIF, BMP, TIFF, HEIC/HEIF (AVIF needs the
 `pillow-avif-plugin` dependency already in `requirements.txt` - stock Pillow doesn't decode AVIF
