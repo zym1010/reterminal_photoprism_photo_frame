@@ -7,18 +7,45 @@ parsing or native text widgets:
 - **Slideshow page** - a random photo, refreshing on a timer or on demand.
 - **Stats page** - a PhotoPrism library stats card (also rendered as an image, by the bridge).
 
-Buttons:
+## Buttons
 
 | Button | Pin | Action |
 |--------|-----|--------|
-| Green  | GPIO3 | Fetch a new random photo on demand |
+| Green  | GPIO3 | Fetch a new random photo on demand (stays on whichever page is active) |
 | White  | GPIO4 | Switch to the slideshow page |
-| White  | GPIO5 | Switch to the stats page (fetches fresh numbers first) |
+| White  | GPIO5 | Switch to the stats page, fetching fresh numbers first |
 
-The stats page has no periodic `update_interval` - it only fetches when you press the button, so
+The stats page has no periodic `update_interval` - it only fetches when you press GPIO5, so
 viewing the slideshow never triggers an unrelated background refresh/flash. Physical left/right
 for the two white buttons may be swapped from what's listed here depending on the unit; swap the
 GPIO4/GPIO5 pin numbers in the YAML if so.
+
+Pressing GPIO5 (stats) does two things in sequence: it downloads `/stats.png` from the bridge
+(a second or two), *then* pushes the result to the panel. Pressing GPIO4 (slideshow) just pushes
+whatever photo is already loaded - no network round-trip - so it responds faster than the stats
+button.
+
+## A note on the panel's refresh speed
+
+**A full refresh of this 6-color Spectra panel takes roughly 30 seconds.** This is a hardware
+property of the panel itself (see `Display update took NNNN ms` in the logs), not something this
+firmware controls. It has two consequences worth knowing about:
+
+- **Button presses during an in-progress refresh are ignored, not queued.** The `epaper_spi`
+  driver's `update()` call rejects (logs an error, does nothing) if you call it again while a
+  refresh is already running - there's no built-in "do it after this one finishes." To avoid that
+  error spamming the logs and to make the behavior predictable, every refresh (both buttons and
+  the periodic photo timer) goes through a `script: mode: single` wrapper (`refresh_display` in
+  the YAML) that silently drops overlapping requests instead. In practice: if you press a button
+  and nothing visibly happens, the panel was still finishing a previous refresh - wait about 30
+  seconds and press again.
+- **This is why the stats page has no background timer** - a periodic stats refresh could
+  silently eat a button press that arrived during it, on a page you weren't even looking at.
+  Keeping it on-demand-only avoids that entirely.
+
+If you want faster perceived response, the main lever is the photo slideshow's `update_interval`
+(currently `20min`) - a shorter interval means more frequent 30-second refresh windows where a
+button press might land and get dropped; a longer interval means fewer of them.
 
 Adapted from the ["Seeed reTerminal Art Display"](https://github.com/GuySie/random-things) config
 by Guy Sie (itself building on work by Paul Krischer), which uses the `epaper_spi` component +

@@ -69,6 +69,24 @@ spi:
   clk_pin: GPIO7
   mosi_pin: GPIO9
 
+# A full refresh of this 6-color panel takes ~30-32 seconds (see "Display update
+# took NNNN ms" in the logs). epaper_spi's update() is non-blocking and simply
+# REJECTS (logs an ERROR, does nothing) if called again while a refresh is still
+# in flight - there's no built-in queueing. Every trigger that pushes to the
+# physical panel (button presses, both images' on_download_finished) goes through
+# this script instead of calling component.update directly, so overlapping
+# requests are serialized: mode 'single' means a refresh request that arrives
+# while one is already running is just dropped (matches what a slow e-ink panel
+# can physically do anyway), instead of surfacing as a driver error.
+script:
+  - id: refresh_display
+    mode: single
+    then:
+      - component.update: epaper_display
+      # Hold the "busy" window open for the real hardware refresh duration, since
+      # component.update() itself returns immediately and doesn't block.
+      - delay: 35s
+
 binary_sensor:
   # Green button: fetch a new random photo on demand
   - platform: gpio
@@ -78,6 +96,9 @@ binary_sensor:
       inverted: true
     id: button_green
     name: "Refresh Photo"
+    filters:
+      - delayed_on: 30ms
+      - delayed_off: 30ms
     on_press:
       then:
         - logger.log: "Green button pressed - fetching new photo"
@@ -91,11 +112,14 @@ binary_sensor:
       inverted: true
     id: button_white_1
     name: "Show Slideshow"
+    filters:
+      - delayed_on: 30ms
+      - delayed_off: 30ms
     on_press:
       then:
         - logger.log: "Switching to slideshow page"
         - lvgl.page.show: main_page
-        - component.update: epaper_display
+        - script.execute: refresh_display
 
   # White button: switch to the library stats page (fetches fresh numbers)
   - platform: gpio
@@ -105,6 +129,9 @@ binary_sensor:
       inverted: true
     id: button_white_2
     name: "Show Stats"
+    filters:
+      - delayed_on: 30ms
+      - delayed_off: 30ms
     on_press:
       then:
         - logger.log: "Switching to stats page - fetching fresh numbers"
@@ -146,7 +173,7 @@ image:
       - lvgl.image.update:
           id: art
           src: photo_image
-      - component.update: epaper_display
+      - script.execute: refresh_display
     on_error:
       - logger.log: "Failed to download photo from bridge"
 
@@ -165,6 +192,6 @@ image:
           id: stats_art
           src: stats_image
       - lvgl.page.show: stats_page
-      - component.update: epaper_display
+      - script.execute: refresh_display
     on_error:
       - logger.log: "Failed to download stats from bridge"
