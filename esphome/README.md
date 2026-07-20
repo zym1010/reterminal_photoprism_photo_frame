@@ -37,14 +37,14 @@ The device never touches the display unless a button was just pressed.
 
 | Button | Pin | Action |
 |--------|-----|--------|
-| Green  | GPIO3 | Refresh whatever's currently showing - new random photo if on the photo page, fresh data if on the dashboard page. Never changes source. |
-| White  | GPIO4 | Cycle to the next dashboard source |
-| White  | GPIO5 | Cycle to the next photo source |
+| Green (center) | GPIO3 | Refresh whatever's currently showing - new random photo if on the photo page, fresh data if on the dashboard page. Never changes source. |
+| White (left)   | GPIO5 | Cycle to the next photo source |
+| White (right)  | GPIO4 | Cycle to the next dashboard source |
 
 A `current_mode` global (0 = photo, 1 = dashboard) tracks which category is active so the green
-button knows which image to refresh. Physical left/right for the two white buttons may be
-swapped from what's listed here depending on the unit; swap the GPIO4/GPIO5 pin numbers in the
-YAML if so.
+button knows which image to refresh. Left/right confirmed on this unit; other units/hardware
+revisions have been seen with GPIO4/GPIO5 reversed - if yours doesn't match, swap the pin numbers
+in the YAML.
 
 Cycling (GPIO4/GPIO5) downloads the new source's image from the bridge (a second or two), *then*
 pushes the result to the panel. The green button does the same for the current source - except

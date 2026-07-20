@@ -21,14 +21,14 @@
 ## bridge do `index % current_count` - so the bridge can grow either list
 ## over time without ever touching this file.
 ##
-## Buttons:
-##   Green (GPIO3):  refresh whatever's currently showing (new random photo
-##                   if on the photo page, fresh data if on the dashboard
-##                   page) - same source, no cycling.
-##   White (GPIO4):  cycle to the next dashboard source
-##   White (GPIO5):  cycle to the next photo source
-## Physical left/right for the two white buttons may be swapped depending on
-## the unit - swap the GPIO4/GPIO5 pin numbers below if so.
+## Buttons (confirmed physical layout on this unit):
+##   Green (center, GPIO3):  refresh whatever's currently showing (new random
+##                           photo if on the photo page, fresh data if on the
+##                           dashboard page) - same source, no cycling.
+##   White (left,  GPIO5):   cycle to the next photo source
+##   White (right, GPIO4):   cycle to the next dashboard source
+## (Other units/hardware revisions have been seen with this reversed - if
+## yours doesn't match, swap the GPIO4/GPIO5 pin numbers below.)
 ##
 ## Based on the "Seeed reTerminal Art Display" config by Guy Sie
 ## (https://github.com/GuySie/random-things), which itself builds on work by
@@ -248,7 +248,7 @@ binary_sensor:
                     - logger.log: "Green button pressed - refreshing the current dashboard source"
                     - component.update: dashboard_image
 
-  # White button: cycle to the next dashboard source
+  # White button (right): cycle to the next dashboard source
   - platform: gpio
     pin:
       number: GPIO4
@@ -292,7 +292,7 @@ binary_sensor:
                   url: !lambda |-
                     return "${bridge_url}/dashboard.png?index=" + std::to_string(id(dashboard_index));
 
-  # White button: cycle to the next photo source
+  # White button (left): cycle to the next photo source
   - platform: gpio
     pin:
       number: GPIO5
