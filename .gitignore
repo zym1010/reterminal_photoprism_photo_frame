@@ -12,3 +12,6 @@ __pycache__/
 
 # Docker export artifacts (rebuild locally instead of committing binaries)
 *.tar
+
+# macOS
+.DS_Store

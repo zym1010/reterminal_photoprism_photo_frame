@@ -8,17 +8,18 @@ leaves the LAN, no cloud accounts of any kind.
 ## Architecture
 
 ```
-[PhotoPrism] <--API--> [photo-frame-bridge] <--HTTP GET /frame.png--> [E1002 running ESPHome]
- (existing)              (this repo)                                   (polls periodically)
+[PhotoPrism] <--API--> [photo-frame-bridge] <--HTTP GET /frame.png, /stats.png--> [E1002 running ESPHome]
+ (existing)              (this repo)                                               (polls / button press)
 ```
 
-- **`photo-frame-bridge/`** - a small self-hosted Flask service. On every request it asks
-  PhotoPrism for a random favorited JPEG, crops it to 800x480, and dithers it to the panel's 6
-  native ink colors (see that directory's README for why *idealized* colors are used instead of
-  "realistic" ones - a genuinely surprising on-device driver quirk).
-- **`esphome/`** - ESPHome firmware for the E1002. Polls the bridge on a timer (and on a physical
-  button press) and displays whatever comes back. No Home Assistant, no cloud - the device talks
-  directly to the bridge over the LAN.
+- **`photo-frame-bridge/`** - a small self-hosted Flask service with two endpoints: a random
+  favorited photo (cropped to 800x480, dithered to the panel's 6 native ink colors - see that
+  directory's README for why *idealized* colors are used instead of "realistic" ones, a genuinely
+  surprising on-device driver quirk) and a PhotoPrism library stats card, also rendered as an
+  image so the device side stays simple.
+- **`esphome/`** - ESPHome firmware for the E1002. Two pages (slideshow / stats), switched with
+  the two white buttons; the green button fetches a new random photo on demand. No Home
+  Assistant, no cloud - the device talks directly to the bridge over the LAN.
 
 See each subdirectory's README for setup/deployment details.
 

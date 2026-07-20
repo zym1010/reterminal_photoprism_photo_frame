@@ -4,7 +4,14 @@
 ## Shows a random favorited photo from a self-hosted PhotoPrism instance,
 ## via the photo-frame-bridge container (../photo-frame-bridge) which
 ## picks the random photo and pre-dithers it to the panel's 6-color
-## Spectra 6 palette on every request.
+## Spectra 6 palette on every request. Two LVGL pages: a slideshow page
+## and a PhotoPrism library stats page (also rendered by the bridge, as
+## a plain image - keeps the device side simple, no JSON parsing).
+##
+## Buttons:
+##   Green (GPIO3):  fetch a new random photo on demand
+##   White (GPIO4):  switch to the slideshow page
+##   White (GPIO5):  switch to the stats page (fetches fresh numbers)
 ##
 ## Based on the "Seeed reTerminal Art Display" config by Guy Sie
 ## (https://github.com/GuySie/random-things), which itself builds on
@@ -62,8 +69,8 @@ spi:
   clk_pin: GPIO7
   mosi_pin: GPIO9
 
-# Green button: press to fetch a new random photo on demand
 binary_sensor:
+  # Green button: fetch a new random photo on demand
   - platform: gpio
     pin:
       number: GPIO3
@@ -75,6 +82,33 @@ binary_sensor:
       then:
         - logger.log: "Green button pressed - fetching new photo"
         - component.update: photo_image
+
+  # White button: switch to the slideshow page
+  - platform: gpio
+    pin:
+      number: GPIO4
+      mode: INPUT_PULLUP
+      inverted: true
+    id: button_white_1
+    name: "Show Slideshow"
+    on_press:
+      then:
+        - logger.log: "Switching to slideshow page"
+        - lvgl.page.show: main_page
+        - component.update: epaper_display
+
+  # White button: switch to the library stats page (fetches fresh numbers)
+  - platform: gpio
+    pin:
+      number: GPIO5
+      mode: INPUT_PULLUP
+      inverted: true
+    id: button_white_2
+    name: "Show Stats"
+    on_press:
+      then:
+        - logger.log: "Switching to stats page - fetching fresh numbers"
+        - component.update: stats_image
 
 display:
   - platform: epaper_spi
@@ -92,6 +126,12 @@ lvgl:
             align: CENTER
             id: art
             src: photo_image
+    - id: stats_page
+      widgets:
+        - image:
+            align: CENTER
+            id: stats_art
+            src: stats_image
 
 # Bridge container on the NAS: random favorited photo from PhotoPrism,
 # already cropped to 800x480 and pre-dithered to the panel's 6-color palette.
@@ -109,3 +149,22 @@ image:
       - component.update: epaper_display
     on_error:
       - logger.log: "Failed to download photo from bridge"
+
+  # PhotoPrism library stats, rendered as an image by the bridge (same 800x480,
+  # same 6-color pipeline). Fetched on demand only (see button_white_2 above) -
+  # no periodic update_interval, so viewing the slideshow never triggers an
+  # unrelated stats refresh/flash in the background.
+  - platform: online_image
+    id: stats_image
+    url: "http://192.168.68.61:8090/stats.png"
+    type: RGB565
+    format: PNG
+    update_interval: never
+    on_download_finished:
+      - lvgl.image.update:
+          id: stats_art
+          src: stats_image
+      - lvgl.page.show: stats_page
+      - component.update: epaper_display
+    on_error:
+      - logger.log: "Failed to download stats from bridge"

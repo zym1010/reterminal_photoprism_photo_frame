@@ -1,8 +1,16 @@
 # photo-frame-bridge
 
-Small self-hosted service that serves `GET /frame.png` → a random favorited JPEG photo from
-PhotoPrism, cropped to 800x480 and dithered to the reTerminal E1002's 6 native ink colors. Runs
-entirely on the LAN — no cloud, no PhotoPrism auth required (this instance has none configured).
+Small self-hosted service with two endpoints:
+
+- `GET /frame.png` → a random favorited JPEG photo from PhotoPrism, cropped to 800x480 and
+  dithered to the reTerminal E1002's 6 native ink colors.
+- `GET /stats.png` → a PhotoPrism library stats card (photo/video/favorite counts, last-added
+  timestamp, etc.), rendered as an image using the same 800x480/6-color pipeline.
+
+Runs entirely on the LAN — no cloud, no PhotoPrism auth required (this instance has none
+configured). Stats are rendered as an image rather than exposed as JSON so the ESPHome side stays
+dead simple: no on-device JSON parsing or native text widgets, just a second `online_image` +
+LVGL page, identical in shape to the photo slideshow.
 
 ## Dithering: idealized colors, not "realistic" ones
 
@@ -19,6 +27,19 @@ back correctly every time. To claw back the perceptual quality that pure primari
 sacrifice, we use `DitherMode.ATKINSON` with `tone="auto"` and `gamut="auto"` compression (only
 available when passing a plain `ColorPalette`, not the library's `ColorScheme` enum, which forces
 tone/gamut off).
+
+## `/stats.png`: cheap counts, not a full library scan
+
+It's tempting to get a "total photos" count by requesting every photo and counting the array -
+PhotoPrism's `X-Count` response header only reflects the true total once your `count` param
+exceeds it, so a naive approach ends up downloading the entire library's JSON (tens of MB) just
+to count it. Instead:
+
+- `GET /api/v1/config` already carries a precomputed `count` object (`photos`, `videos`, `live`,
+  `favorites`, `places`, `cameras`, etc.) - a single lightweight request.
+- The "last added" timestamp comes from `GET /api/v1/photos?count=1&order=added`, which returns
+  one record's `CreatedAt` (when it was imported, not when it was taken) - also a single cheap
+  request.
 
 ## Environment variables
 
@@ -81,11 +102,16 @@ From any machine on the LAN:
 ```bash
 curl -o frame.png -w "HTTP %{http_code}, %{size_download} bytes\n" \
   http://192.168.68.61:8090/frame.png
+curl -o stats.png -w "HTTP %{http_code}, %{size_download} bytes\n" \
+  http://192.168.68.61:8090/stats.png
 ```
 
-Should return `HTTP 200` and an ~80-150KB PNG. Open it — it should be an 800x480 image dithered
-into six pure colors (black, white, red, yellow, blue, green), matching a random favorited photo
-from the library. Repeated requests should return different photos.
+`frame.png` should return `HTTP 200` and an ~80-150KB PNG — an 800x480 image dithered into six
+pure colors (black, white, red, yellow, blue, green), matching a random favorited photo from the
+library. Repeated requests should return different photos.
+
+`stats.png` should return `HTTP 200` and a much smaller (~5-10KB) PNG - a text card with photo,
+video, favorite, and other library counts, plus a "last added" timestamp.
 
 `GET /healthz` returns `ok` and can be used as a container health check.
 
