@@ -1,36 +1,38 @@
 # ESPHome firmware
 
-Firmware for the Seeed reTerminal E1002 (ESP32-S3, 7.3" Spectra 6 color e-paper). Two LVGL pages,
-both just full-screen images fetched from the `photo-frame-bridge` service - no on-device JSON
-parsing or native text widgets:
+Firmware for the Seeed reTerminal E1002 (ESP32-S3, 7.3" Spectra 6 color e-paper). Three LVGL
+pages, all just full-screen images fetched from the `photo-frame-bridge` service - no on-device
+JSON parsing or native text widgets:
 
 - **Slideshow page** - a random photo, refreshing on a timer or on demand.
 - **Stats page** - a PhotoPrism library stats card (also rendered as an image, by the bridge).
+- **Weather page** - current conditions for a few fixed locations (also rendered as an image;
+  see `../photo-frame-bridge/README.md` for the source and why it's the one piece of this project
+  that isn't fully self-hosted).
 
 ## Buttons
 
 | Button | Pin | Action |
 |--------|-----|--------|
 | Green  | GPIO3 | Slideshow page if not already there; if already there, fetch a new random photo |
-| White  | GPIO4 | Unassigned - reserved for a future page |
+| White  | GPIO4 | Switch to the weather page, fetching a fresh forecast first |
 | White  | GPIO5 | Switch to the stats page, fetching fresh numbers first |
 
 The green button's two behaviors are collapsed onto one button because they're mutually
 exclusive in practice: there's no reason to "go to slideshow" while already on it, so that press
 is repurposed to mean "refresh" instead. A `current_page` global tracks which page is active
-(0 = slideshow, 1 = stats) since ESPHome/LVGL doesn't expose a way to query the active page
-directly - update it if you add more pages.
+(0 = slideshow, 1 = stats, 2 = weather) since ESPHome/LVGL doesn't expose a way to query the
+active page directly - update it if you add more pages.
 
-The stats page has no periodic `update_interval` - it only fetches when you press GPIO5, so
-viewing the slideshow never triggers an unrelated background refresh/flash. Physical left/right
-for the two white buttons may be swapped from what's listed here depending on the unit; swap the
-GPIO4/GPIO5 pin numbers in the YAML if so.
+Both the stats and weather pages have no periodic `update_interval` - they only fetch when you
+press their button, so viewing the slideshow never triggers an unrelated background
+refresh/flash. Physical left/right for the two white buttons may be swapped from what's listed
+here depending on the unit; swap the GPIO4/GPIO5 pin numbers in the YAML if so.
 
-Pressing GPIO5 (stats) does two things in sequence: it downloads `/stats.png` from the bridge
+Pressing GPIO4 or GPIO5 does two things in sequence: downloads the relevant image from the bridge
 (a second or two), *then* pushes the result to the panel. Pressing the green button while already
-on the slideshow does the same (fetch, then push) for `/frame.png`; pressing it from the stats
-page just pushes the slideshow's already-loaded photo - no network round-trip, so it responds
-faster.
+on the slideshow does the same (fetch, then push) for `/frame.png`; pressing it from another page
+just pushes the slideshow's already-loaded photo - no network round-trip, so it responds faster.
 
 ## A note on the panel's refresh speed
 
@@ -65,8 +67,9 @@ re-downloads the same URL on a timer.
 1. Copy `secrets.yaml.example` to `secrets.yaml` and fill in your WiFi credentials. Generate your
    own random values for the API/OTA/AP passwords (commands included in the example file).
    `secrets.yaml` is gitignored - never commit it.
-2. Edit `eink-photo-frame.yaml` and update both `image:` entries' `url` (`/frame.png` and
-   `/stats.png`) to point at your own `photo-frame-bridge` instance's LAN address.
+2. Edit `eink-photo-frame.yaml` and update all three `image:` entries' `url` (`/frame.png`,
+   `/stats.png`, `/weather.png`) to point at your own `photo-frame-bridge` instance's LAN
+   address.
 3. Install ESPHome and flash over USB (first flash only - OTA works after that):
    ```bash
    python3 -m venv .esphome-venv

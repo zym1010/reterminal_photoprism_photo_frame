@@ -38,6 +38,48 @@ DEVICE_PALETTE = ColorPalette(
     accent="red",
 )
 
+# The one non-self-hosted piece of this project: a real weather forecast needs an
+# external data source. Open-Meteo needs no API key/account (just lat/long), which
+# keeps this as close to "no new cloud accounts" as a weather feature can get.
+WEATHER_URL = "https://api.open-meteo.com/v1/forecast"
+WEATHER_LOCATIONS = [
+    ("Cupertino, CA", 37.3230, -122.0322),
+    ("Wuhan, Hubei", 30.5928, 114.3055),
+    ("Dalian, Liaoning", 38.9140, 121.6147),
+]
+
+# WMO weather codes -> human-readable condition, per Open-Meteo's docs.
+WMO_CONDITIONS = {
+    0: "Clear sky",
+    1: "Mainly clear",
+    2: "Partly cloudy",
+    3: "Overcast",
+    45: "Fog",
+    48: "Rime fog",
+    51: "Light drizzle",
+    53: "Drizzle",
+    55: "Dense drizzle",
+    56: "Freezing drizzle",
+    57: "Freezing drizzle",
+    61: "Light rain",
+    63: "Rain",
+    65: "Heavy rain",
+    66: "Freezing rain",
+    67: "Freezing rain",
+    71: "Light snow",
+    73: "Snow",
+    75: "Heavy snow",
+    77: "Snow grains",
+    80: "Light showers",
+    81: "Showers",
+    82: "Violent showers",
+    85: "Snow showers",
+    86: "Heavy snow showers",
+    95: "Thunderstorm",
+    96: "Thunderstorm, hail",
+    99: "Thunderstorm, heavy hail",
+}
+
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
 log = app.logger
@@ -140,6 +182,64 @@ def render_stats_image(counts, last_added):
     return img
 
 
+def fetch_weather(name, lat, lon):
+    resp = requests.get(
+        WEATHER_URL,
+        params={
+            "latitude": lat,
+            "longitude": lon,
+            "current": "temperature_2m,weather_code",
+            "daily": "temperature_2m_max,temperature_2m_min,weather_code",
+            "temperature_unit": "celsius",
+            "timezone": "auto",
+            "forecast_days": 1,
+        },
+        timeout=REQUEST_TIMEOUT,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    current = data["current"]
+    daily = data["daily"]
+    # timezone=auto makes Open-Meteo return `current.time` in the location's own
+    # local time (not UTC) - exactly what we want to display, no conversion needed.
+    local_time = datetime.strptime(current["time"], "%Y-%m-%dT%H:%M").strftime("%b %d, %-I:%M %p")
+    return {
+        "name": name,
+        "temp": round(current["temperature_2m"]),
+        "condition": WMO_CONDITIONS.get(current["weather_code"], "Unknown"),
+        "high": round(daily["temperature_2m_max"][0]),
+        "low": round(daily["temperature_2m_min"][0]),
+        "local_time": local_time,
+    }
+
+
+def render_weather_image(results):
+    img = Image.new("RGB", (WIDTH, HEIGHT), (255, 255, 255))
+    draw = ImageDraw.Draw(img)
+    title_font = ImageFont.load_default(size=44)
+    city_font = ImageFont.load_default(size=34)
+    detail_font = ImageFont.load_default(size=28)
+
+    margin = 40
+    draw.text((margin, margin), "Weather", font=title_font, fill=(0, 0, 0))
+    draw.line((margin, margin + 60, WIDTH - margin, margin + 60), fill=(0, 0, 0), width=2)
+
+    top = margin + 90
+    bottom = HEIGHT - margin
+    row_height = (bottom - top) // len(results)
+    y = top
+    for r in results:
+        draw.text((margin, y), r["name"], font=city_font, fill=(0, 0, 0))
+        draw.text((WIDTH - margin, y + 4), f"{r['temp']}°C", font=city_font, fill=(0, 0, 0), anchor="ra")
+        detail = f"As of {r['local_time']}  ·  {r['condition']}  ·  H:{r['high']}° L:{r['low']}°"
+        draw.text((margin, y + 46), detail, font=detail_font, fill=(0, 0, 0))
+        if y + row_height < bottom:
+            draw.line((margin, y + row_height - 15, WIDTH - margin, y + row_height - 15), fill=(0, 0, 0), width=1)
+        y += row_height
+
+    return img
+
+
 @app.route("/frame.png")
 def frame():
     photo = pick_random_jpeg_photo()
@@ -169,6 +269,18 @@ def stats():
         counts.get("videos"),
         counts.get("favorites"),
     )
+    return Response(png_bytes, mimetype="image/png", headers={"Cache-Control": "no-store"})
+
+
+@app.route("/weather.png")
+def weather():
+    try:
+        results = [fetch_weather(name, lat, lon) for name, lat, lon in WEATHER_LOCATIONS]
+        png_bytes = render_to_png(render_weather_image(results))
+    except Exception:
+        log.exception("Failed to fetch/render weather")
+        abort(502, description="Failed to fetch/render weather")
+    log.info("Serving weather for %s", ", ".join(r["name"] for r in results))
     return Response(png_bytes, mimetype="image/png", headers={"Cache-Control": "no-store"})
 
 

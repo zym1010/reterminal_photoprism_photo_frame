@@ -4,13 +4,14 @@
 ## Shows a random favorited photo from a self-hosted PhotoPrism instance,
 ## via the photo-frame-bridge container (../photo-frame-bridge) which
 ## picks the random photo and pre-dithers it to the panel's 6-color
-## Spectra 6 palette on every request. Two LVGL pages: a slideshow page
-## and a PhotoPrism library stats page (also rendered by the bridge, as
-## a plain image - keeps the device side simple, no JSON parsing).
+## Spectra 6 palette on every request. Three LVGL pages: a slideshow page,
+## a PhotoPrism library stats page, and a weather page - the latter two
+## also rendered by the bridge as plain images, keeping the device side
+## simple (no on-device JSON parsing or native text widgets).
 ##
 ## Buttons:
 ##   Green (GPIO3):  slideshow page if not already there, else fetch a new photo
-##   White (GPIO4):  unassigned - reserved for a future page (e.g. weather)
+##   White (GPIO4):  switch to the weather page (fetches fresh forecast)
 ##   White (GPIO5):  switch to the stats page (fetches fresh numbers)
 ##
 ## Based on the "Seeed reTerminal Art Display" config by Guy Sie
@@ -126,20 +127,24 @@ binary_sensor:
               - logger.log: "Green button pressed - fetching new photo"
               - component.update: photo_image
 
-  # White button: unassigned for now (reserved for a future page)
+  # White button: switch to the weather page (fetches fresh forecast)
   - platform: gpio
     pin:
       number: GPIO4
       mode: INPUT_PULLUP
       inverted: true
     id: button_white_1
-    name: "White Button 1"
+    name: "Show Weather"
     filters:
       - delayed_on: 30ms
       - delayed_off: 30ms
     on_press:
       then:
-        - logger.log: "White button 1 pressed - no action assigned yet"
+        - logger.log: "Switching to weather page - fetching fresh forecast"
+        - globals.set:
+            id: current_page
+            value: "2"
+        - component.update: weather_image
 
   # White button: switch to the library stats page (fetches fresh numbers)
   - platform: gpio
@@ -182,6 +187,12 @@ lvgl:
             align: CENTER
             id: stats_art
             src: stats_image
+    - id: weather_page
+      widgets:
+        - image:
+            align: CENTER
+            id: weather_art
+            src: weather_image
 
 # Bridge container on the NAS: random favorited photo from PhotoPrism,
 # already cropped to 800x480 and pre-dithered to the panel's 6-color palette.
@@ -218,3 +229,22 @@ image:
       - script.execute: refresh_display
     on_error:
       - logger.log: "Failed to download stats from bridge"
+
+  # Weather forecast for three fixed locations, rendered as an image by the
+  # bridge (using Open-Meteo - the one non-self-hosted piece of this project,
+  # since a real forecast needs an external data source). Fetched on demand
+  # only, same reasoning as stats_image above.
+  - platform: online_image
+    id: weather_image
+    url: "http://192.168.68.61:8090/weather.png"
+    type: RGB565
+    format: PNG
+    update_interval: never
+    on_download_finished:
+      - lvgl.image.update:
+          id: weather_art
+          src: weather_image
+      - lvgl.page.show: weather_page
+      - script.execute: refresh_display
+    on_error:
+      - logger.log: "Failed to download weather from bridge"

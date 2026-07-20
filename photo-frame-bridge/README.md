@@ -1,16 +1,19 @@
 # photo-frame-bridge
 
-Small self-hosted service with two endpoints:
+Small self-hosted service with three endpoints:
 
 - `GET /frame.png` → a random favorited JPEG photo from PhotoPrism, cropped to 800x480 and
   dithered to the reTerminal E1002's 6 native ink colors.
 - `GET /stats.png` → a PhotoPrism library stats card (photo/video/favorite counts, last-added
   timestamp, etc.), rendered as an image using the same 800x480/6-color pipeline.
+- `GET /weather.png` → current conditions for three fixed locations (see below), also rendered
+  as an image.
 
 Runs entirely on the LAN — no cloud, no PhotoPrism auth required (this instance has none
-configured). Stats are rendered as an image rather than exposed as JSON so the ESPHome side stays
-dead simple: no on-device JSON parsing or native text widgets, just a second `online_image` +
-LVGL page, identical in shape to the photo slideshow.
+configured), except for `/weather.png`'s one external call (see below). Everything is rendered
+as an image rather than exposed as JSON so the ESPHome side stays dead simple: no on-device JSON
+parsing or native text widgets, just an `online_image` + LVGL page per feature, identical in
+shape to the photo slideshow.
 
 ## Dithering: idealized colors, not "realistic" ones
 
@@ -40,6 +43,21 @@ to count it. Instead:
 - The "last added" timestamp comes from `GET /api/v1/photos?count=1&order=added`, which returns
   one record's `CreatedAt` (when it was imported, not when it was taken) - also a single cheap
   request.
+
+## `/weather.png`: the one non-self-hosted piece
+
+A real weather forecast needs an external data source - there's no way around that without
+owning your own weather station. This uses [Open-Meteo](https://open-meteo.com/), which needs no
+API key or account signup (just lat/long in the request), keeping it as close to "no new cloud
+accounts" as a weather feature can get.
+
+Locations are hardcoded in `WEATHER_LOCATIONS` in `app.py` (currently Cupertino CA, Wuhan Hubei,
+and Dalian Liaoning) - edit that list to change them. The main temperature/condition shown is
+**live current conditions**, re-fetched fresh on every request (not a cached/stale forecast); the
+H/L range is just today's expected high/low, same as any phone weather widget shows alongside
+current conditions. Each location's time is shown in *that location's own local time* (Open-Meteo
+returns `current.time` already localized when `timezone=auto` is passed - no conversion needed on
+our end).
 
 ## Environment variables
 
@@ -104,6 +122,8 @@ curl -o frame.png -w "HTTP %{http_code}, %{size_download} bytes\n" \
   http://192.168.68.61:8090/frame.png
 curl -o stats.png -w "HTTP %{http_code}, %{size_download} bytes\n" \
   http://192.168.68.61:8090/stats.png
+curl -o weather.png -w "HTTP %{http_code}, %{size_download} bytes\n" \
+  http://192.168.68.61:8090/weather.png
 ```
 
 `frame.png` should return `HTTP 200` and an ~80-150KB PNG — an 800x480 image dithered into six
@@ -112,6 +132,9 @@ library. Repeated requests should return different photos.
 
 `stats.png` should return `HTTP 200` and a much smaller (~5-10KB) PNG - a text card with photo,
 video, favorite, and other library counts, plus a "last added" timestamp.
+
+`weather.png` should return `HTTP 200` and a similarly small PNG - one row per configured
+location, each with current temperature/condition, today's H/L, and that location's local time.
 
 `GET /healthz` returns `ok` and can be used as a container health check.
 
