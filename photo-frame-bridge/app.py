@@ -134,12 +134,30 @@ def pick_random_jpeg_photo():
     return random.choice(candidates) if candidates else None
 
 
+def flatten_to_rgb(img):
+    """Correctly-oriented, opaque RGB version of `img`.
+
+    A plain `.convert("RGB")` on an image with an alpha channel just drops the
+    alpha and exposes whatever RGB values happen to sit under transparent
+    pixels - often leftover/garbage data in image editing tools, which then
+    shows up as visible noise once dithered. Composite onto white first for
+    anything with real transparency (RGBA/LA, or "P" mode with a transparency
+    entry) instead.
+    """
+    img = ImageOps.exif_transpose(img)
+    if img.mode in ("RGBA", "LA") or (img.mode == "P" and "transparency" in img.info):
+        img = img.convert("RGBA")
+        background = Image.new("RGB", img.size, (255, 255, 255))
+        background.paste(img, mask=img.split()[-1])
+        return background
+    return img.convert("RGB")
+
+
 def fetch_and_process(photo):
     thumb_path = photo["Thumbs"][THUMB_SIZE]["src"]
     resp = requests.get(f"{PHOTOPRISM_URL}{thumb_path}", timeout=REQUEST_TIMEOUT)
     resp.raise_for_status()
-    img = Image.open(io.BytesIO(resp.content))
-    img = ImageOps.exif_transpose(img).convert("RGB")
+    img = flatten_to_rgb(Image.open(io.BytesIO(resp.content)))
     fitted = ImageOps.fit(img, (WIDTH, HEIGHT), method=Image.LANCZOS, centering=(0.5, 0.5))
     return render_to_png(fitted)
 
@@ -165,8 +183,7 @@ def fetch_and_process_local(source):
     path = pick_random_local_image(source)
     if path is None:
         return None
-    img = Image.open(path)
-    img = ImageOps.exif_transpose(img).convert("RGB")
+    img = flatten_to_rgb(Image.open(path))
     fitted = ImageOps.fit(img, (WIDTH, HEIGHT), method=Image.LANCZOS, centering=(0.5, 0.5))
     return render_to_png(fitted)
 
