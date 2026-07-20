@@ -65,20 +65,26 @@ firmware controls. It has two consequences worth knowing about:
 **Button presses during an in-progress refresh are ignored entirely, not queued.** The
 `epaper_spi` driver's `update()` call rejects (logs an error, does nothing) if you call it again
 while a refresh is already running - there's no built-in "do it after this one finishes." Every
-refresh goes through a `script: mode: single` wrapper (`refresh_display` in the YAML) that tracks
-the ~30-35s busy window, plus a `refresh_busy` global that's set the instant a button press is
-*accepted* and only cleared once that whole cycle finishes (or a download fails - see its
-`on_error:` handler). Each button's `on_press` checks `refresh_busy` **before doing anything
-else** - if true, the press is a complete no-op: no source cycling, no counter increment, no
-download. Gating on this flag rather than only on `script.is_running: refresh_display` matters:
-`online_image`'s own "already downloading" guard doesn't become active until it starts decoding,
-not during the initial HTTP-connect phase (observed to take up to ~2.5s) - a second press landing
-in that earlier window used to slip past every guard and silently overwrite the in-flight
-download, abandoning the first request and showing whichever one happened to win the race.
-`refresh_busy` closes that gap by blocking from the moment a press is accepted, not from whenever
-the download happens to reach the decoding stage. In practice: if you press a button and nothing
-visibly happens, the panel was still finishing a previous refresh - wait about 30 seconds and
-press again, and that press is guaranteed to count.
+refresh goes through a `script: mode: single` wrapper (`refresh_display` in the YAML) that holds a
+`refresh_busy` global true from the instant a button press is *accepted* until 40s after
+`component.update: epaper_display` is called (a real refresh is ~31.5-32s very consistently by
+eye; 40s is deliberate margin, not the measured time - see "Known issue" below for why that margin
+matters). It's also cleared early if a download fails (see each image's `on_error:` handler), or
+by a separate stuck-refresh watchdog after 3 minutes if the busy window somehow never clears on
+its own (a real hang, not just a slow cycle - the `epaper_spi` driver has no timeout of its own on
+this, so recovery has to happen at our level).
+
+Each button's `on_press` checks `refresh_busy` **before doing anything else** - if true, the press
+is a complete no-op: no source cycling, no counter increment, no download. Gating on this flag
+rather than only on `script.is_running: refresh_display` matters: `online_image`'s own "already
+downloading" guard doesn't become active until it starts decoding, not during the initial
+HTTP-connect phase (observed to take up to ~2.5s) - a second press landing in that earlier window
+used to slip past every guard and silently overwrite the in-flight download, abandoning the first
+request and showing whichever one happened to win the race. `refresh_busy` closes that gap by
+blocking from the moment a press is accepted, not from whenever the download happens to reach the
+decoding stage. In practice: if you press a button and nothing visibly happens, the panel was
+still finishing a previous refresh - wait about 40 seconds and press again, and that press is
+guaranteed to count.
 
 ## Known issue (resolved): silent failures traced to the old periodic photo timer
 
@@ -97,11 +103,31 @@ Fix: removed the periodic timer entirely (see "Buttons" above) - the photo page 
 only, same as the dashboard page always was, so there's no automatic trigger left to race a
 button press. `sdkconfig_options: CONFIG_ESP_TASK_WDT_TIMEOUT_S` (raising the task watchdog
 timeout to 15s) is still in the YAML as a low-risk safety margin from when a task-watchdog trip
-was also suspected as a contributing cause, but was never confirmed independently (no crash
-backtrace could be captured - the device's USB-serial link wasn't passing data through during
-testing, despite the network logger working fine). If problems recur with everything now fully
-on-demand, that's a real signal the watchdog theory (or something else entirely) needs a working
-serial connection to actually diagnose.
+was also suspected as a contributing cause, but was never confirmed independently.
+
+## Known issue (resolved): `refresh_busy` window was too tight
+
+After the periodic-timer fix above, silent failures still happened occasionally. Root cause
+turned out to be much more mundane than a hardware fault: `refresh_busy`'s hold window was 35s,
+which is barely above the normal ~31.5-32s refresh time with almost no slack. If a cycle ever ran
+even a little long, the flag could clear before the panel actually finished, letting a new button
+press through while the previous refresh was still genuinely in progress - which the `epaper_spi`
+driver rejects outright (logs an ERROR, no-op), reproducing the exact "download succeeded but
+nothing ever reached the display" symptom.
+
+This was diagnosed properly, not guessed: `hardware_uart: UART0` (see logger config above) turned
+out to be the fix for USB-serial capture returning zero bytes all along, which finally made real
+device logs possible. That briefly pointed at a scarier theory - the panel's BUSY pin hanging
+forever during power-off, since `epaper_spi` has no timeout on that wait and two captured cases
+showed 19-29+ seconds of `"Waiting for idle in state POWER_OFF"` with nothing else logged. But
+checking the *complete* log (not just the window initially captured) showed both cases actually
+completed fine - just slower than expected (~48s instead of ~31.5s), most likely because VERBOSE
+logging itself (hundreds of extra lines over a 115200-baud serial link) was adding real overhead
+and inflating the measurement. Cross-checked against direct visual observation of the physical
+panel (unaffected by any logging overhead) confirming it never takes more than ~35s, `refresh_busy`
+was widened to 40s - a real margin above both the ~31.5-32s normal case and the ~35s eyeballed
+worst case, without chasing the inflated 48s figure. A separate 3-minute watchdog (see "Buttons"
+above) handles the case where something is *actually* stuck, as a backstop.
 
 Adapted from the ["Seeed reTerminal Art Display"](https://github.com/GuySie/random-things) config
 by Guy Sie (itself building on work by Paul Krischer), which uses the `epaper_spi` component +

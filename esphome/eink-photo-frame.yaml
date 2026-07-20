@@ -53,6 +53,9 @@ esphome:
         - globals.set:
             id: refresh_busy
             value: "true"
+        - globals.set:
+            id: refresh_started_at
+            value: !lambda "return millis();"
         - component.update: photo_image
 
 esp32:
@@ -76,7 +79,18 @@ psram:
   mode: octal
   speed: 80MHz
 
+# The reTerminal E series uses a CH340K USB-serial bridge wired specifically to
+# UART0 (per Seeed's docs) - without this explicit setting, serial logging got
+# zero bytes despite the device being fully healthy (network logging always
+# worked). Confirmed fix: this was the actual cause.
+#
+# (VERBOSE + epaper_spi:VERBOSE was temporarily enabled here to diagnose a
+# suspected "stuck forever" hang - see refresh_display below for what that
+# investigation actually found. Reverted to normal levels since verbose
+# logging itself roughly *doubled* the panel refresh time - 48s vs the normal
+# ~31.5s - which isn't something to run with day to day.)
 logger:
+  hardware_uart: UART0
 
 api:
   encryption:
@@ -103,15 +117,25 @@ spi:
   clk_pin: GPIO7
   mosi_pin: GPIO9
 
-# A full refresh of this 6-color panel takes ~30-32 seconds (see "Display update
-# took NNNN ms" in the logs). epaper_spi's update() is non-blocking and simply
-# REJECTS (logs an ERROR, does nothing) if called again while a refresh is still
-# in flight - there's no built-in queueing. Every trigger that pushes to the
-# physical panel (button presses, both images' on_download_finished) goes through
-# this script instead of calling component.update directly, so overlapping
-# requests are serialized: mode 'single' means a refresh request that arrives
-# while one is already running is just dropped (matches what a slow e-ink panel
-# can physically do anyway), instead of surfacing as a driver error.
+# A full refresh of this 6-color panel normally takes ~31.5-32s very
+# consistently (many measurements clustered tightly in that range). epaper_spi's
+# update() is non-blocking and simply REJECTS (logs an ERROR, does nothing) if
+# called again while a refresh is still in flight - there's no built-in
+# queueing. Every trigger that pushes to the physical panel goes through this
+# script instead of calling component.update directly, so overlapping requests
+# are serialized: mode 'single' means a refresh request that arrives while one
+# is already running is just dropped.
+#
+# Investigated a suspected "stuck forever" hang here (panel waiting on its BUSY
+# pin during power-off with no logged progress) by enabling VERBOSE logging.
+# Turned out to be a false alarm *for the cases actually captured* - both
+# eventually completed with "Display update took" - but the logging itself
+# reported ~48s where visual observation of the real panel (unaffected by
+# logging overhead) confirms it never actually takes more than ~35s - the
+# instrumentation was inflating its own measurement. Widened this script's
+# hold window from 35s to 40s: a small, real margin above the ~31.5-32s normal
+# case and the ~35s eyeballed worst case, without chasing the inflated 48s
+# figure.
 #
 # refresh_busy (below) is cleared here, at the very end - see its comment for why
 # gating on this script's own is_running isn't enough on its own.
@@ -122,10 +146,28 @@ script:
       - component.update: epaper_display
       # Hold the "busy" window open for the real hardware refresh duration, since
       # component.update() itself returns immediately and doesn't block.
-      - delay: 35s
+      - delay: 40s
       - globals.set:
           id: refresh_busy
           value: "false"
+
+# Safety net for a *genuinely* stuck refresh (as opposed to just a slow one,
+# which the 40s window above already covers): if refresh_busy has been true for
+# far longer than any legitimate cycle could take, something is actually wrong
+# (e.g. the panel's BUSY pin truly never clearing) and the only known recovery
+# is a full reset - the epaper_spi driver has no internal timeout of its own.
+# 3 minutes is roughly 5x the eyeballed worst case, so this should never fire
+# during normal operation, only on a real hang.
+interval:
+  - interval: 30s
+    then:
+      - if:
+          condition:
+            lambda: "return id(refresh_busy) && (millis() - id(refresh_started_at) > 180000);"
+          then:
+            - logger.log: "Refresh stuck for over 3 minutes - rebooting to recover"
+            - delay: 500ms
+            - lambda: "App.safe_reboot();"
 
 globals:
   # True from the moment a button's fetch is *accepted* until the whole cycle
@@ -147,6 +189,12 @@ globals:
   - id: refresh_busy
     type: bool
     initial_value: "false"
+  # millis() timestamp of when refresh_busy last became true - used only by the
+  # stuck-refresh watchdog (see the interval: block above) to detect a
+  # genuinely hung cycle, not a normal one.
+  - id: refresh_started_at
+    type: uint32_t
+    initial_value: '0'
   # Which page is currently active: 0 = photo, 1 = dashboard. Drives what the
   # green button's "refresh" means.
   - id: current_mode
@@ -187,6 +235,9 @@ binary_sensor:
               - globals.set:
                   id: refresh_busy
                   value: "true"
+              - globals.set:
+                  id: refresh_started_at
+                  value: !lambda "return millis();"
               - if:
                   condition:
                     lambda: "return id(current_mode) == 0;"
@@ -219,6 +270,9 @@ binary_sensor:
               - globals.set:
                   id: refresh_busy
                   value: "true"
+              - globals.set:
+                  id: refresh_started_at
+                  value: !lambda "return millis();"
               - globals.set:
                   id: current_mode
                   value: "1"
@@ -260,6 +314,9 @@ binary_sensor:
               - globals.set:
                   id: refresh_busy
                   value: "true"
+              - globals.set:
+                  id: refresh_started_at
+                  value: !lambda "return millis();"
               - globals.set:
                   id: current_mode
                   value: "0"
