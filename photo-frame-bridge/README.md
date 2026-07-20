@@ -153,8 +153,13 @@ no docker-compose or registry needed.
      since it hardcodes the URL/port. Set it explicitly.
    - **Volume/Folder mapping**: mount the `adhoc_images` shared folder from step 4 to
      `/data/adhoc_images` inside the container (read-only is fine, the bridge never writes to it).
-   - **Environment variables**: override any of the table above if needed (defaults already point
-     at `192.168.68.61:12342`, 800x480, favorites-only, `/data/adhoc_images`).
+   - **Environment variables**: `ADHOC_IMAGES_DIR` is baked into the image (declared in the
+     `Dockerfile`), so it'll already show up in DSM's Environment tab set to `/data/adhoc_images`
+     - edit it there if you'd rather mount to a different container path, but whatever value you
+     set here must match your **Volume/Folder mapping**'s mount path above, or the bridge will
+     look in the wrong place and only ever see `photoprism` as a source. Override any of the
+     other env vars from the table above too if needed (defaults already point at
+     `192.168.68.61:12342`, 800x480, favorites-only).
    - **Auto-restart**: enable, so it comes back up after a NAS reboot.
 6. Start the container.
 

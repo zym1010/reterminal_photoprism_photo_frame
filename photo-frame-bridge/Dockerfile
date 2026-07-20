@@ -10,6 +10,7 @@ COPY app.py .
 EXPOSE 8090
 
 ENV PHOTOPRISM_URL=http://192.168.68.61:12342 \
+    ADHOC_IMAGES_DIR=/data/adhoc_images \
     WIDTH=800 \
     HEIGHT=480 \
     FAVORITES_ONLY=true \
