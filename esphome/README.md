@@ -54,14 +54,20 @@ one).
 property of the panel itself (see `Display update took NNNN ms` in the logs), not something this
 firmware controls. It has two consequences worth knowing about:
 
-- **Button presses during an in-progress refresh are ignored, not queued.** The `epaper_spi`
-  driver's `update()` call rejects (logs an error, does nothing) if you call it again while a
-  refresh is already running - there's no built-in "do it after this one finishes." To avoid that
-  error spamming the logs and to make the behavior predictable, every refresh (both buttons and
-  the periodic photo timer) goes through a `script: mode: single` wrapper (`refresh_display` in
-  the YAML) that silently drops overlapping requests instead. In practice: if you press a button
-  and nothing visibly happens, the panel was still finishing a previous refresh - wait about 30
-  seconds and press again.
+- **Button presses during an in-progress refresh are ignored entirely, not queued.** The
+  `epaper_spi` driver's `update()` call rejects (logs an error, does nothing) if you call it
+  again while a refresh is already running - there's no built-in "do it after this one
+  finishes." Every refresh (both buttons and the periodic photo timer) goes through a
+  `script: mode: single` wrapper (`refresh_display` in the YAML) that tracks the ~30-35s busy
+  window. Each button's `on_press` checks `script.is_running: refresh_display` **before doing
+  anything else** - if a refresh is in progress, the press is a complete no-op: no source
+  cycling, no counter increment, no download. This matters because the counters
+  (`photo_index`/`dashboard_index`) drive what the *next* request will show - incrementing them
+  during a dropped refresh would desync the device's idea of "current index" from what's
+  actually on screen, since the push that would have made them match never happened. In
+  practice: if you press a button and nothing visibly happens, the panel was still finishing a
+  previous refresh - wait about 30 seconds and press again, and that press is guaranteed to
+  count.
 - **This is why the dashboard page has no background timer** - a periodic refresh could silently
   eat a button press that arrived during it, on a page you weren't even looking at. Keeping it
   on-demand-only avoids that entirely.
