@@ -129,6 +129,16 @@ was widened to 40s - a real margin above both the ~31.5-32s normal case and the 
 worst case, without chasing the inflated 48s figure. A separate 3-minute watchdog (see "Buttons"
 above) handles the case where something is *actually* stuck, as a backstop.
 
+### If the device seems unresponsive: check the network before assuming a hang
+
+USB-serial on this setup (a CH340K bridge) has repeatedly, silently stopped delivering *any*
+bytes mid-session while the device kept running completely normally - it's happened enough times
+in development to call out explicitly. If serial logs go quiet, don't conclude the device is
+stuck; check `ping eink-photo-frame.local` and whether its API port (6053) is reachable first. If
+those succeed, the device is fine and it's the USB link that died - reconnect logs over the
+network instead: `esphome logs eink-photo-frame.yaml --device eink-photo-frame.local` (or its IP).
+That connection has been reliable every time serial wasn't.
+
 Adapted from the ["Seeed reTerminal Art Display"](https://github.com/GuySie/random-things) config
 by Guy Sie (itself building on work by Paul Krischer), which uses the `epaper_spi` component +
 LVGL, including the `online_image.set_url` pattern used here for dynamic URLs. Simplified/adapted
