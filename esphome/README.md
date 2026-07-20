@@ -1,13 +1,15 @@
 # ESPHome firmware
 
 Firmware for the Seeed reTerminal E1002 (ESP32-S3, 7.3" Spectra 6 color e-paper). Two LVGL pages,
-each just a full-screen image fetched from the `photo-frame-bridge` service - no on-device JSON
-parsing or native text widgets:
+each mainly a full-screen image fetched from the `photo-frame-bridge` service - no on-device JSON
+parsing, and the only native text widget is a small sensor readout blended onto the dashboard page
+(see "Device sensors" below):
 
 - **Photo page** - a random photo from whichever photo source is currently selected.
 - **Dashboard page** - weather or PhotoPrism library stats (also rendered as images, by the
   bridge; see `../photo-frame-bridge/README.md` for the weather source and why it's the one
-  piece of this project that isn't fully self-hosted).
+  piece of this project that isn't fully self-hosted), with the device's own battery/temperature/
+  humidity overlaid in the top-right corner.
 
 ## How source selection works
 
@@ -55,6 +57,35 @@ A background slideshow timer (auto-refresh the photo page every N minutes) used 
 was removed - see "Known issue" below for why. It's a reasonable thing to want back, but needs to
 be reintroduced carefully (gated on `refresh_busy`, not a bare `online_image` `update_interval`)
 rather than just restoring the old approach.
+
+## Device sensors
+
+The board has its own onboard SHT4x temperature/humidity sensor (I2C, GPIO19/20) and a battery
+voltage divider (ADC on GPIO1, enabled via GPIO21) - see Seeed's wiki for this board. These only
+exist on the device, unlike everything else on the dashboard page which the bridge fetches from
+elsewhere - so rather than having the device push these to the bridge (or the bridge pull them
+from the device), a deliberate choice was made to keep this device from calling out to anywhere
+except the bridge it already talks to. Instead, a small LVGL label is blended directly onto the
+dashboard page's top-right corner (`device_status_label`), recomputed by the
+`update_device_status_label` script every time one of the three sensors reports a new value
+(`on_value`, roughly every 60s). This only ever touches LVGL's in-memory buffer, never the panel
+itself - whatever the label currently says just gets baked in the next time an actual refresh
+happens (a button press), same as everything else here. Battery percent is a rough single-cell
+LiPo curve (3.0V empty, 4.2V full) computed inline in that script, not a real fuel gauge.
+
+This is the one place in this firmware with a native text widget rather than a downloaded image -
+see the top of this file for why that's normally avoided, and why an exception was made here.
+
+## Power
+
+Deliberately light-touch for now: `wifi: power_save_mode: light` lets the radio doze between
+beacon intervals, with no effect on button responsiveness since this device is on-demand only
+anyway. Full deep sleep (device sleeps between button presses, wakes on a GPIO interrupt) was
+considered - the reTerminal E1002 has its own 2000mAh battery and Seeed's stock firmware already
+does exactly this - but was deferred: it would add real, noticeable latency to every button press
+(wake + WiFi reconnect before anything happens), which is a bigger UX trade-off than this project
+wanted to take on without a clearer need for it. Revisit if runtime on a power bank/battery turns
+out to actually be a problem in practice.
 
 ## A note on the panel's refresh speed
 
