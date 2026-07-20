@@ -50,12 +50,27 @@ esphome:
       then:
         # Extra time for the display to finish initializing (needed since ESPHome 2025.11)
         - delay: 5000ms
+        - globals.set:
+            id: refresh_busy
+            value: "true"
         - component.update: photo_image
 
 esp32:
   board: esp32-s3-devkitc-1
   framework:
     type: esp-idf
+    # Hypothesis, not confirmed (no crash backtrace could be captured - the
+    # device's USB-serial link wasn't passing any data despite the network
+    # logger working fine, so panic output was unobservable). Logs consistently
+    # show "a scheduled task took a long time for an operation" warnings
+    # (615ms-2.6s) right as each download starts, clustering exactly where
+    # intermittent silent failures/reboots were observed. ESP-IDF's default
+    # 5s task watchdog could plausibly trip if one of these stalls happens to
+    # stack with other slow work (LVGL redraw, epaper_spi's per-loop
+    # processing) in the same window. Raising it is a low-risk mitigation to
+    # test, not a verified fix.
+    sdkconfig_options:
+      CONFIG_ESP_TASK_WDT_TIMEOUT_S: "15"
 
 psram:
   mode: octal
@@ -97,6 +112,9 @@ spi:
 # requests are serialized: mode 'single' means a refresh request that arrives
 # while one is already running is just dropped (matches what a slow e-ink panel
 # can physically do anyway), instead of surfacing as a driver error.
+#
+# refresh_busy (below) is cleared here, at the very end - see its comment for why
+# gating on this script's own is_running isn't enough on its own.
 script:
   - id: refresh_display
     mode: single
@@ -105,8 +123,30 @@ script:
       # Hold the "busy" window open for the real hardware refresh duration, since
       # component.update() itself returns immediately and doesn't block.
       - delay: 35s
+      - globals.set:
+          id: refresh_busy
+          value: "false"
 
 globals:
+  # True from the moment a button's fetch is *accepted* until the whole cycle
+  # (download -> decode -> display push -> 35s hardware-refresh hold) finishes.
+  # Gating buttons on this - not on `script.is_running: refresh_display` - matters
+  # because online_image's own "already updating" guard only becomes active once
+  # it starts decoding, not during the initial HTTP-connect phase (observed to
+  # take up to ~2.5s). A second button press landing in that earlier window slips
+  # past both online_image's guard and a refresh_display-only check, silently
+  # overwriting the in-flight download's HTTP container - the first request gets
+  # abandoned and the second one wins (confirmed: observed the device show the
+  # 2nd source with the 1st request's result discarded). A device reboot was also
+  # seen after a lot of repeated button-mashing during testing; a resource leak
+  # from this exact race is a plausible cause (the abandoned container's .end()
+  # never gets called) but that connection is unconfirmed - no crash backtrace was
+  # captured. This flag closes the race either way, by blocking button presses
+  # from the instant one is accepted, not from whenever the download happens to
+  # reach the decoding stage.
+  - id: refresh_busy
+    type: bool
+    initial_value: "false"
   # Which page is currently active: 0 = photo, 1 = dashboard. Drives what the
   # green button's "refresh" means.
   - id: current_mode
@@ -140,10 +180,13 @@ binary_sensor:
       then:
         - if:
             condition:
-              script.is_running: refresh_display
+              lambda: "return id(refresh_busy);"
             then:
               - logger.log: "Green button pressed - ignored, a refresh is already in progress"
             else:
+              - globals.set:
+                  id: refresh_busy
+                  value: "true"
               - if:
                   condition:
                     lambda: "return id(current_mode) == 0;"
@@ -169,10 +212,13 @@ binary_sensor:
       then:
         - if:
             condition:
-              script.is_running: refresh_display
+              lambda: "return id(refresh_busy);"
             then:
               - logger.log: "Dashboard button pressed - ignored, a refresh is already in progress"
             else:
+              - globals.set:
+                  id: refresh_busy
+                  value: "true"
               - globals.set:
                   id: current_mode
                   value: "1"
@@ -207,10 +253,13 @@ binary_sensor:
       then:
         - if:
             condition:
-              script.is_running: refresh_display
+              lambda: "return id(refresh_busy);"
             then:
               - logger.log: "Photo button pressed - ignored, a refresh is already in progress"
             else:
+              - globals.set:
+                  id: refresh_busy
+                  value: "true"
               - globals.set:
                   id: current_mode
                   value: "0"
@@ -267,6 +316,11 @@ image:
       - script.execute: refresh_display
     on_error:
       - logger.log: "Failed to download photo from bridge"
+      # Without this, a failed download leaves refresh_busy stuck true forever,
+      # since refresh_display (the only other place that clears it) never runs.
+      - globals.set:
+          id: refresh_busy
+          value: "false"
 
   # Dashboard sources (weather, PhotoPrism stats, ...). Fetched on demand only
   # (see button_white_1 above) - no periodic update_interval, so viewing the
@@ -285,3 +339,6 @@ image:
       - script.execute: refresh_display
     on_error:
       - logger.log: "Failed to download dashboard source from bridge"
+      - globals.set:
+          id: refresh_busy
+          value: "false"

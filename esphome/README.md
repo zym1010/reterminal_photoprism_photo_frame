@@ -59,15 +59,19 @@ firmware controls. It has two consequences worth knowing about:
   again while a refresh is already running - there's no built-in "do it after this one
   finishes." Every refresh (both buttons and the periodic photo timer) goes through a
   `script: mode: single` wrapper (`refresh_display` in the YAML) that tracks the ~30-35s busy
-  window. Each button's `on_press` checks `script.is_running: refresh_display` **before doing
-  anything else** - if a refresh is in progress, the press is a complete no-op: no source
-  cycling, no counter increment, no download. This matters because the counters
-  (`photo_index`/`dashboard_index`) drive what the *next* request will show - incrementing them
-  during a dropped refresh would desync the device's idea of "current index" from what's
-  actually on screen, since the push that would have made them match never happened. In
-  practice: if you press a button and nothing visibly happens, the panel was still finishing a
-  previous refresh - wait about 30 seconds and press again, and that press is guaranteed to
-  count.
+  window, plus a `refresh_busy` global that's set the instant a button press is *accepted* and
+  only cleared once that whole cycle finishes (or a download fails - see its `on_error:`
+  handler). Each button's `on_press` checks `refresh_busy` **before doing anything else** - if
+  true, the press is a complete no-op: no source cycling, no counter increment, no download.
+  Gating on this flag rather than only on `script.is_running: refresh_display` matters:
+  `online_image`'s own "already downloading" guard doesn't become active until it starts
+  decoding, not during the initial HTTP-connect phase (observed to take up to ~2.5s) - a second
+  press landing in that earlier window used to slip past every guard and silently overwrite the
+  in-flight download, abandoning the first request and showing whichever one happened to win the
+  race. `refresh_busy` closes that gap by blocking from the moment a press is accepted, not from
+  whenever the download happens to reach the decoding stage. In practice: if you press a button
+  and nothing visibly happens, the panel was still finishing a previous refresh - wait about 30
+  seconds and press again, and that press is guaranteed to count.
 - **This is why the dashboard page has no background timer** - a periodic refresh could silently
   eat a button press that arrived during it, on a page you weren't even looking at. Keeping it
   on-demand-only avoids that entirely.
@@ -75,6 +79,28 @@ firmware controls. It has two consequences worth knowing about:
 If you want faster perceived response, the main lever is the photo page's `update_interval`
 (currently `20min`) - a shorter interval means more frequent 30-second refresh windows where a
 button press might land and get dropped; a longer interval means fewer of them.
+
+## Known issue: intermittent silent failure after a successful download
+
+Occasionally (not every time) a download completes successfully (`Image fully downloaded...` in
+the logs) but nothing happens after that - no `Display update took...` line ever appears, and the
+device sometimes reboots a few seconds later (`safe_mode: Boot seems successful; resetting boot
+loop counter` shows up once it comes back). Not fully root-caused: every occurrence coincided with
+a device reboot, but no crash backtrace could be captured to confirm why, since the ESP32's
+USB-serial link wasn't passing any data through in testing (the network-based logger worked fine,
+but panics only print over serial, so the actual panic reason was unobservable).
+
+The one consistent pattern across every log where this happened: a `"a scheduled task took a long
+time for an operation"` warning (615ms-2.6s) right as the download starts, most likely the HTTP
+GET's DNS+connect phase blocking the main loop. ESP-IDF's default task watchdog fires after 5s of
+a task not yielding - if one of these stalls happens to stack with other slow work (LVGL redraw,
+`epaper_spi`'s per-loop processing) in the same window, that could plausibly trip it. As a
+mitigation (not a confirmed fix), the task watchdog timeout is raised to 15s via
+`sdkconfig_options: CONFIG_ESP_TASK_WDT_TIMEOUT_S`. If this issue keeps happening after that
+change, the watchdog-timeout theory is likely wrong and the real cause needs a working serial
+connection to diagnose (a different USB cable/port is worth trying, since this device's
+USB-serial link behaved inconsistently across an otherwise-identical setup that worked earlier in
+development).
 
 Adapted from the ["Seeed reTerminal Art Display"](https://github.com/GuySie/random-things) config
 by Guy Sie (itself building on work by Paul Krischer), which uses the `epaper_spi` component +
