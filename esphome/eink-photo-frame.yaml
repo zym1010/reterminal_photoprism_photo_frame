@@ -307,7 +307,14 @@ image:
     url: "${bridge_url}/photo.png?index=0"
     type: RGB565
     format: PNG
-    update_interval: 20min
+    # No periodic refresh - fully on-demand (green button), same as dashboard_image
+    # below. A background timer here was found to race button presses for the
+    # physical display (whichever's on_download_finished chain won the last
+    # component.update: epaper_display call determined what showed, regardless
+    # of what was actually pressed) - simplest fix is no automatic triggers at
+    # all. Revisit later if a background slideshow timer is wanted again; it'll
+    # need its own refresh_busy gating, not the online_image update_interval.
+    update_interval: never
     on_download_finished:
       - lvgl.image.update:
           id: photo_art
