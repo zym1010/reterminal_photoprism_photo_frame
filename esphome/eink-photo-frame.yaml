@@ -95,8 +95,9 @@ lvgl:
 
 # Bridge container on the NAS: random favorited photo from PhotoPrism,
 # already cropped to 800x480 and pre-dithered to the panel's 6-color palette.
-online_image:
-  - id: photo_image
+image:
+  - platform: online_image
+    id: photo_image
     url: "http://192.168.68.61:8090/frame.png"
     type: RGB565
     format: PNG
