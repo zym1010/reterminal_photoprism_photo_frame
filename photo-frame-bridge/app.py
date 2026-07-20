@@ -104,14 +104,20 @@ def render_to_png(img):
 
 
 def list_photo_sources():
-    """"photoprism" plus every immediate subfolder of ADHOC_IMAGES_DIR, sorted."""
+    """"photoprism" plus every immediate subfolder of ADHOC_IMAGES_DIR, sorted.
+
+    Skips folders starting with "@", "#", or "." - NAS-internal housekeeping
+    folders (e.g. Synology's "@eaDir" thumbnail cache and "#recycle" bin), not
+    real photo sources.
+    """
     sources = ["photoprism"]
     if os.path.isdir(ADHOC_IMAGES_DIR):
         sources.extend(
             sorted(
                 name
                 for name in os.listdir(ADHOC_IMAGES_DIR)
-                if os.path.isdir(os.path.join(ADHOC_IMAGES_DIR, name))
+                if not name.startswith(("@", "#", "."))
+                and os.path.isdir(os.path.join(ADHOC_IMAGES_DIR, name))
             )
         )
     return sources
