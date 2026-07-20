@@ -170,11 +170,15 @@ binary_sensor:
         - logger.log:
             format: "Dashboard button pressed - cycling to index %d"
             args: [id(dashboard_index)]
+        # online_image.set_url triggers its own download automatically - a
+        # trailing component.update here would race it and get rejected with
+        # "Image already being updated", which was observed to corrupt the
+        # completion callback chain (download succeeds but on_download_finished
+        # never fires, so nothing ever reaches the display). Don't add one back.
         - online_image.set_url:
             id: dashboard_image
             url: !lambda |-
               return "${bridge_url}/dashboard.png?index=" + std::to_string(id(dashboard_index));
-        - component.update: dashboard_image
 
   # White button: cycle to the next photo source
   - platform: gpio
@@ -198,11 +202,12 @@ binary_sensor:
         - logger.log:
             format: "Photo button pressed - cycling to index %d"
             args: [id(photo_index)]
+        # See the comment on the dashboard button above - set_url already
+        # triggers its own download, an extra component.update here would race it.
         - online_image.set_url:
             id: photo_image
             url: !lambda |-
               return "${bridge_url}/photo.png?index=" + std::to_string(id(photo_index));
-        - component.update: photo_image
 
 display:
   - platform: epaper_spi

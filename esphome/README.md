@@ -20,8 +20,15 @@ bridge does the wraparound using whatever its *current* source list is, so addin
 README for the full explanation.
 
 Each button press rewrites the relevant `online_image`'s URL at runtime via
-`online_image.set_url` (a lambda building `.../photo.png?index=<counter>`), then triggers a
-download.
+`online_image.set_url` (a lambda building `.../photo.png?index=<counter>`), which **triggers its
+own download automatically** - don't follow it with an explicit `component.update:` on the same
+image. Doing so was tried and observed to actively break things: the extra call races the
+auto-triggered download, gets rejected by `online_image`'s own concurrency guard ("Image already
+being updated"), and that collision corrupts the completion callback chain - the download
+finishes successfully but `on_download_finished` never fires, so nothing ever reaches the
+display (symptom: pressing a button seems to do nothing, sometimes needing several presses).
+`component.update:` is still correct - required, even - anywhere that *isn't* preceded by
+`set_url` on the same image (the green button's refresh, and the initial `on_boot` fetch).
 
 ## Buttons
 
