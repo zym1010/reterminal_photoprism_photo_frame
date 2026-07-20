@@ -129,6 +129,37 @@ was widened to 40s - a real margin above both the ~31.5-32s normal case and the 
 worst case, without chasing the inflated 48s figure. A separate 3-minute watchdog (see "Buttons"
 above) handles the case where something is *actually* stuck, as a backstop.
 
+## Known issue (resolved): "phantom" refresh - download succeeds, panel never updates, no log at all
+
+After the two fixes above, a rarer but more confusing failure remained: a button press would
+download and decode successfully, but the panel simply wouldn't change - with **no** error and
+**no** `Display update took...` line at all, ever, for that press. The *next* press would then work
+normally. No pattern by content (photo/weather/stats all hit it) or by elapsed time between
+presses - eventually narrowed down to a specific repro: press, wait for a full successful refresh,
+then press again soon after - the second press phantoms, the third (or a later retry) works.
+
+Root cause, confirmed with per-tag `epaper_spi: VERBOSE` logging (much cheaper than a global
+VERBOSE run - see the git history of this file's `logger:` section if that's needed again): a race
+between `epaper_spi` and LVGL, not a hardware or timing-margin issue. `epaper_spi`'s `update()`
+handler runs a check after calling `do_update_()` - if nothing was drawn (its internal
+`x_low_`/`x_high_` dirty-rect bounds are still empty), it silently short-circuits straight back to
+`IDLE`, skipping the entire refresh pipeline and logging nothing (confirmed directly in the logs:
+`Enter state UPDATE` immediately followed by `Enter state IDLE`, ~20ms apart, vs. the normal
+sequence continuing on through `RESET` -> `INITIALISE` -> `TRANSFER_DATA` -> ...). The catch: for
+an LVGL-driven display like this one, `do_update_()` itself never draws anything - ESPHome's `lvgl`
+component never registers a `Display` `page_`/`writer_` (see
+`esphome/components/display/display.cpp`'s `do_update_()`). The *only* thing that ever actually
+draws pixels is LVGL's own independent `lv_timer_handler()`, run from `LvglComponent::loop()` - a
+separate component, on its own schedule. Because `display:` is declared before `lvgl:` in this
+file, `epaper_spi`'s loop tends to run first on the tick right after `lvgl.image.update` just
+invalidated the new image - so its "did anything get drawn" check can catch LVGL's bounds still
+empty (LVGL hasn't had its own turn to flush yet) and bail out before LVGL gets the chance.
+
+Fix: a 100ms `delay:` right before `component.update: epaper_display` in the `refresh_display`
+script, giving LVGL's loop a guaranteed window to flush the new content first. Trivial next to the
+~31.5s refresh itself. Confirmed as the actual fix (not just a reduced-probability mitigation) by
+repeated back-to-back button testing after applying it.
+
 ### If the device seems unresponsive: check the network before assuming a hang
 
 USB-serial on this setup (a CH340K bridge) has repeatedly, silently stopped delivering *any*

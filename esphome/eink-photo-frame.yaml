@@ -84,11 +84,6 @@ psram:
 # zero bytes despite the device being fully healthy (network logging always
 # worked). Confirmed fix: this was the actual cause.
 #
-# (VERBOSE + epaper_spi:VERBOSE was temporarily enabled here to diagnose a
-# suspected "stuck forever" hang - see refresh_display below for what that
-# investigation actually found. Reverted to normal levels since verbose
-# logging itself roughly *doubled* the panel refresh time - 48s vs the normal
-# ~31.5s - which isn't something to run with day to day.)
 logger:
   hardware_uart: UART0
 
@@ -143,6 +138,26 @@ script:
   - id: refresh_display
     mode: single
     then:
+      # Root cause of the "phantom" silent-no-refresh bug (confirmed via VERBOSE
+      # epaper_spi logs: UPDATE state entered then immediately exited straight to
+      # IDLE, ~20ms later, with the panel untouched): epaper_spi's do_update_()
+      # is a no-op for LVGL-driven displays like this one (esphome's lvgl
+      # component never registers a Display page_/writer_ - see
+      # esphome/components/display/display.cpp's do_update_()). The ONLY thing
+      # that ever actually draws pixels (and thus populates the x_low_/x_high_
+      # dirty-rect bounds epaper_spi's UPDATE state checks) is LVGL's OWN
+      # independent lv_timer_handler(), called from LvglComponent::loop() - a
+      # separate component, on its own schedule. Because `display:` is declared
+      # before `lvgl:` in this file, epaper_spi's loop tends to run BEFORE
+      # LvglComponent's on the very next tick after lvgl.image.update just
+      # invalidated the new image - so epaper_spi's UPDATE-state check can catch
+      # the bounds still empty (LVGL hasn't flushed yet) and silently short-
+      # circuit back to IDLE, with no log line and no error - exactly the
+      # observed symptom. This delay gives LVGL's own loop a guaranteed window
+      # to actually flush the new content into the buffer first. 100ms is a
+      # large safety margin over one scheduler pass (main-loop iterations here
+      # are sub-10ms normally); trivial next to the ~31.5s refresh itself.
+      - delay: 100ms
       - component.update: epaper_display
       # Hold the "busy" window open for the real hardware refresh duration, since
       # component.update() itself returns immediately and doesn't block.
