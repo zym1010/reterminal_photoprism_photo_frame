@@ -76,6 +76,19 @@ LiPo curve (3.0V empty, 4.2V full) computed inline in that script, not a real fu
 This is the one place in this firmware with a native text widget rather than a downloaded image -
 see the top of this file for why that's normally avoided, and why an exception was made here.
 
+A second label right below it (`device_time_label`) shows the date/time the *current refresh*
+actually happened, e.g. "Mon Jul 20  06:45 PM". The ESP32 has no RTC of its own, so this needs
+`time: platform: sntp` (NTP over the same WiFi connection) to know wall-clock time at all - the one
+place this device calls out to anything beyond the bridge, though NTP is a much thinner exception
+than weather/Todoist on the bridge side (just a timestamp, no account, no query content). Set
+`timezone:` to wherever the device physically is (POSIX TZ format, or the simpler `<Region>/<City>`
+IANA name - ESPHome resolves that to the right POSIX DST rule automatically). Deliberately updated
+in `refresh_display`, right before the actual panel push, rather than on a timer like the sensor
+label above it - date/time changes continuously, so the freshest value is whatever it is at the
+exact instant a real refresh happens, not stale by however long since the last periodic tick. Shows
+blank until the first successful SNTP sync after boot (guarded on `.is_valid()`) - usually a few
+seconds, not instant, and never if WiFi/NTP is unreachable.
+
 ## Power
 
 Deliberately light-touch for now: `wifi: power_save_mode: light` lets the radio doze between
@@ -116,6 +129,30 @@ blocking from the moment a press is accepted, not from whenever the download hap
 decoding stage. In practice: if you press a button and nothing visibly happens, the panel was
 still finishing a previous refresh - wait about 40 seconds and press again, and that press is
 guaranteed to count.
+
+### Expected: a several-second "still rejected" window right after the panel visibly finishes
+
+`refresh_busy` clears exactly 40s after `component.update: epaper_display` was *called*, not 40s
+after the hardware actually finishes - and the actual hardware push is usually faster than that
+(~31-32s). So there's a normal, expected gap of roughly 40 minus the real duration (~8-9s in
+practice) *after* the panel is visibly done where a button press still logs "ignored, a refresh is
+already in progress" - not a hang, not a bug, just the fixed safety margin (see "Known issue" below
+for why it's fixed-and-generous rather than tuned tight) not having counted down yet.
+
+Worked example from a real log:
+
+```
+[05:22:42.474] Display update took 31175 ms      <- push STARTED at 05:22:11.299 (42.474 - 31.175s)
+[05:22:45.826] Dashboard button pressed - ignored  <- 45.826 < 51.299 (11.299+40s): still within window, correctly rejected
+[05:22:53.251] Dashboard button pressed - cycling  <- 53.251 > 51.299: window just closed, correctly accepted
+```
+
+If this dead zone is ever annoying enough to want gone, the real fix would be tightening the 40s
+margin closer to the actual ~31.5-32s duration - but `epaper_spi`'s internal ready/idle state
+(`state_`/`is_idle_()`) is a protected member with no public getter, so there's no cheap way to
+just ask the driver "are you actually idle yet" instead of guessing with a fixed timer. Tightening
+the margin also directly reintroduces the risk from the next "Known issue" below (a slower-than-
+usual cycle getting interrupted) - not done without a clear reason to.
 
 ## Known issue (resolved): silent failures traced to the old periodic photo timer
 

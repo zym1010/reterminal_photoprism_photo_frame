@@ -116,6 +116,16 @@ wifi:
     ssid: "Eink-Photo-Frame Fallback"
     password: !secret eink_photo_frame_ap_password
 
+# SNTP over the WiFi connection above - the ESP32 has no RTC/battery-backed
+# clock of its own, so wall-clock time only exists once this has synced at
+# least once after boot. Used to show a "as of <date/time>" line on the
+# dashboard page - see the device_time_label update inside refresh_display
+# below, and the label widget itself further down in lvgl:.
+time:
+  - platform: sntp
+    id: esp_time
+    timezone: America/Los_Angeles
+
 captive_portal:
 
 http_request:
@@ -215,6 +225,21 @@ script:
   - id: refresh_display
     mode: single
     then:
+      # Refreshed here (right before the actual panel push) rather than on a
+      # timer like update_device_status_label above - date/time changes
+      # continuously, so the freshest possible value is whatever it is at the
+      # instant a real refresh is actually about to happen, not up to 60s
+      # stale from the last sensor update. Guarded on is_valid() since the
+      # ESP32 has no RTC of its own - time doesn't exist at all until SNTP has
+      # synced at least once after boot (normally within a few seconds, but
+      # not instant, and never if WiFi/NTP is somehow unreachable).
+      - lvgl.label.update:
+          id: device_time_label
+          text: !lambda |-
+            if (!id(esp_time).now().is_valid()) {
+              return std::string("");
+            }
+            return id(esp_time).now().strftime("%a %b %d  %I:%M %p");
       # Root cause of the "phantom" silent-no-refresh bug (confirmed via VERBOSE
       # epaper_spi logs: UPDATE state entered then immediately exited straight to
       # IDLE, ~20ms later, with the panel untouched): epaper_spi's do_update_()
@@ -456,6 +481,17 @@ lvgl:
             align: TOP_RIGHT
             x: -20
             y: 20
+            text: ""
+            text_color: 0x000000
+        # Date/time this refresh actually happened - see refresh_display above
+        # for why it's updated there instead of on the sensor timer like the
+        # label above it. Empty until the first successful SNTP sync after
+        # boot (usually a few seconds, not instant).
+        - label:
+            id: device_time_label
+            align: TOP_RIGHT
+            x: -20
+            y: 46
             text: ""
             text_color: 0x000000
 
