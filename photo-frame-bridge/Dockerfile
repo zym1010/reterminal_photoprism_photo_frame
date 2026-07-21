@@ -41,6 +41,7 @@ ENV PHOTOPRISM_URL=http://192.168.68.61:12342 \
     HEIGHT=480 \
     FAVORITES_ONLY=true \
     THUMB_SIZE=fit_1920 \
+    STATS_ADDED_DAYS=30,60,90 \
     TODOIST_API_TOKEN=
 
 CMD ["python", "app.py"]

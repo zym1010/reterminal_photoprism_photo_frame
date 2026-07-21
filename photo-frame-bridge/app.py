@@ -17,6 +17,9 @@ HEIGHT = int(os.environ.get("HEIGHT", "480"))
 FAVORITES_ONLY = os.environ.get("FAVORITES_ONLY", "true").lower() != "false"
 THUMB_SIZE = os.environ.get("THUMB_SIZE", "fit_1920")
 CANDIDATE_COUNT = int(os.environ.get("CANDIDATE_COUNT", "25"))
+# Which "Added (N days)" rows the stats card shows - comma-separated, any
+# number of values (not fixed to three anymore).
+STATS_ADDED_DAYS = [int(d.strip()) for d in os.environ.get("STATS_ADDED_DAYS", "30,60,90").split(",")]
 # Mounted on the NAS side: each immediate subfolder becomes an additional photo
 # source, discovered fresh on every request - drop a new folder in, no redeploy
 # needed. "photoprism" (PhotoPrism favorites) is always source 0.
@@ -395,7 +398,7 @@ def fetch_library_stats():
     latest = latest_resp.json()
     last_added = latest[0]["CreatedAt"] if latest else None
 
-    added_recent = {days: fetch_added_count(days) for days in (30, 60, 90)}
+    added_recent = {days: fetch_added_count(days) for days in STATS_ADDED_DAYS}
 
     return counts, last_added, added_recent
 
@@ -430,11 +433,12 @@ def render_stats_image(counts, last_added, added_recent):
         ("Photos", counts.get("photos", 0) + counts.get("live", 0)),
         ("Videos", counts.get("videos")),
         ("Favorites", counts.get("favorites")),
-        ("Added (30 days)", added_recent.get(30)),
-        ("Added (60 days)", added_recent.get(60)),
-        ("Added (90 days)", added_recent.get(90)),
-        ("Last Added", format_last_added(last_added)),
     ]
+    # STATS_ADDED_DAYS controls both which days get fetched (fetch_library_stats)
+    # and the rows shown here - iterating it directly (not added_recent.keys())
+    # keeps row order matching the configured order even with duplicate values.
+    rows += [(f"Added ({days} days)", added_recent.get(days)) for days in STATS_ADDED_DAYS]
+    rows.append(("Last Added", format_last_added(last_added)))
 
     top = margin + 90
     bottom = HEIGHT - margin

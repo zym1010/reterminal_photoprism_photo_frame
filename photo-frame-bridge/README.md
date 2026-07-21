@@ -54,8 +54,9 @@ tone/gamut off).
 
 ## Dashboard source: `stats` — cheap counts, not a full library scan
 
-Shows: Photos, Videos, Favorites, items Added in the last 30/60/90 days, and the Last Added
-timestamp. `photos`, `live`, and `videos` from `count` are mutually exclusive categories that sum
+Shows: Photos, Videos, Favorites, items Added in the last N days (configurable, see
+`STATS_ADDED_DAYS` below - defaults to 30/60/90), and the Last Added timestamp. `photos`, `live`,
+and `videos` from `count` are mutually exclusive categories that sum
 exactly to `count.all` (verified against a live instance), so "Photos" here is `photos + live`
 merged into one number rather than a separate "Live Photos" row - not a subset relationship,
 just two categories combined for a shorter card. "Places" and "Cameras" were dropped as not
@@ -71,12 +72,12 @@ to count it. Instead:
 - The "last added" timestamp comes from `GET /api/v1/photos?count=1&order=added`, which returns
   one record's `CreatedAt` (when it was imported, not when it was taken) - also a single cheap
   request.
-- The 30/60/90-day "added" counts use an undocumented-but-real search filter,
-  `q=added:"<RFC3339 timestamp>"` (added at or after this time - confirmed via
-  [photoprism/photoprism#4300](https://github.com/photoprism/photoprism/issues/4300), not in the
-  official docs). Requesting a large `count` alongside it and reading the `X-Count` header gives
-  an exact total without downloading the whole library - cheap in practice because a personal
-  library only adds a handful of items in any given month, so the actual response body stays
+- The "added in the last N days" counts (one row per value in `STATS_ADDED_DAYS`) use an
+  undocumented-but-real search filter, `q=added:"<RFC3339 timestamp>"` (added at or after this
+  time - confirmed via [photoprism/photoprism#4300](https://github.com/photoprism/photoprism/issues/4300),
+  not in the official docs). Requesting a large `count` alongside it and reading the `X-Count`
+  header gives an exact total without downloading the whole library - cheap in practice because a
+  personal library only adds a handful of items in any given month, so the actual response body stays
   small regardless of how large `count` is set.
 
 ## Dashboard source: `weather` — the one non-self-hosted piece
@@ -167,6 +168,7 @@ rendering, not discoverable from docs alone:
 | `FAVORITES_ONLY`    | `true`                        | Only pick PhotoPrism photos marked as favorite    |
 | `THUMB_SIZE`        | `fit_1920`                    | Which PhotoPrism thumbnail rendition to fetch     |
 | `CANDIDATE_COUNT`   | `25`                          | How many random PhotoPrism candidates to fetch per request before filtering to JPEG and picking one |
+| `STATS_ADDED_DAYS`  | `30,60,90`                    | Comma-separated day counts for the `stats` card's "Added (N days)" rows - any number of values, not fixed to three |
 | `TODOIST_API_TOKEN` | *(empty)*                     | Personal Todoist API token - `todos` dashboard source shows "not configured" if unset |
 | `PORT`              | `8090`                        | Port the Flask server listens on inside the container |
 
