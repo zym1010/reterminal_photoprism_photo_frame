@@ -16,10 +16,10 @@ whatever the *current* source list actually is. See `esphome/README.md` for how 
 uses this.
 
 Runs entirely on the LAN — no cloud, no PhotoPrism auth required (this instance has none
-configured), except for the weather dashboard source's one external call (see below). Everything
-is rendered as an image rather than exposed as JSON so the ESPHome side stays dead simple: no
-on-device JSON parsing or native text widgets, just two `online_image`s (one per category) whose
-URLs get rewritten at runtime.
+configured), except for the weather and Todoist dashboard sources' external calls (see below).
+Everything is rendered as an image rather than exposed as JSON so the ESPHome side stays dead
+simple: no on-device JSON parsing, just two `online_image`s (one per category) whose URLs get
+rewritten at runtime.
 
 ## Photo sources: PhotoPrism + `adhoc_images` subfolders
 
@@ -94,18 +94,81 @@ current conditions. Each location's time is shown in *that location's own local 
 returns `current.time` already localized when `timezone=auto` is passed - no conversion needed on
 our end).
 
+## Dashboard source: `todos` — the second non-self-hosted piece
+
+Shows active [Todoist](https://todoist.com/) tasks in two columns (each filled top-to-bottom
+before moving to the next, like a newspaper, so the sort order below still reads naturally),
+numbered, with the due date on its own underlined line below each task name. There's no realistic
+self-hosted alternative to a task manager you actually already use day to day, so this is treated
+the same as weather: an explicit, acknowledged exception to "fully self-hosted." Layout follows
+TRMNL's own Todoist plugin (a reference screenshot, not just their product page) - flat numbered
+list, no project/section grouping - adapted per an explicit ask: **undated tasks are sorted first**,
+then dated tasks by due date ascending (each group by priority descending as a tiebreak). Row
+height is computed per task (undated tasks take one compact line; dated ones take two, for the due
+date) rather than a fixed size, so the mix of undated/dated tasks determines how many actually fit
+on screen - there's no single fixed answer to "how many tasks fit."
+
+Requires a personal API token (**Todoist Settings → Integrations → Developer**) set as
+`TODOIST_API_TOKEN`. Without it, the card just says so rather than erroring - a missing/empty
+token is a normal, expected state (e.g. before you've configured it), not a failure.
+
+Task text color is restricted to `DEVICE_PALETTE`'s pure primaries (red for overdue, blue for
+high-priority-but-not-overdue, black otherwise) for the same reason described above under
+"Dithering: idealized colors, not realistic ones" - an off-palette color, *including grays*, dithers
+into a visibly speckled/near-invisible mess on thin strokes and lines instead of rendering as a
+clean solid color. This was tried and confirmed directly: a light-gray column divider and gray
+secondary text (index numbers, due-date labels) looked fine before dithering and were nearly gone
+after. Pure black is the only safe "de-emphasized" choice here - visual hierarchy for secondary
+text comes from size/weight instead. The bundled CJK font (see below) only ships one weight, so
+task names are faux-bolded via `stroke_width` rather than a real bold font file. Long task names
+are truncated with an ellipsis to fit the column width, and the whole list is capped to however
+many rows actually fit (`+N more` shown if truncated) - this is a glance-at-your-phone-instead
+device, not a full task manager. Markdown links in task content (Todoist's own default onboarding
+tasks have these, e.g. `[Watch](https://...)`) are stripped down to just the link text - a raw URL
+isn't useful on an e-ink card.
+
+A handful of things confirmed only by testing against a real account and real Pillow/FreeType
+rendering, not discoverable from docs alone:
+
+- The REST API v2 endpoint this originally used (`/rest/v2/tasks`) was retired in early 2026
+  (returns `410 Gone`) in favor of a unified, cursor-paginated `/api/v1/tasks` (`{"results": [...],
+  "next_cursor": ...}`, not a bare array).
+- That new `/api/v1/tasks` endpoint accepts a `filter` query param *without erroring* but silently
+  ignores it, always returning every active task regardless of what filter string is passed
+  (confirmed directly - `overdue`, `today`, and even a nonsense string all returned the identical
+  full list). Real filtering is a separate endpoint, `/api/v1/tasks/filter` with a `query` param.
+  Moot for this card specifically now (it shows everything, sorted, rather than filtering), but
+  worth knowing if a filtered view is wanted again later.
+- Pillow's built-in default font has no CJK glyph coverage at all, so any task containing
+  Chinese/Japanese/Korean text rendered as broken missing-glyph boxes. Fixed by switching every
+  card (not just `todos`) to WenQuanYi Micro Hei, installed via `apt` in the `Dockerfile`
+  (`load_font()` in `app.py` falls back to Pillow's bitmap default if that font file isn't present,
+  so `app.py` still runs standalone without Docker).
+- Color emoji support depends heavily on the *specific font file's internal format*, not just
+  "does Pillow support color emoji" in the abstract. Google's current Noto Color Emoji release uses
+  a newer vector format (COLR/CPAL) that renders as completely blank in this Pillow/FreeType
+  combination - no error, just silently invisible glyphs (confirmed via bounding-box inspection,
+  not just "no exception raised"). The older CBDT bitmap-strike format does render correctly, but
+  only at its one native pixel size (109px for this specific font) - Pillow raises "invalid pixel
+  size" for any other size, so emoji glyphs are rendered at that native size and scaled down in
+  code to match the surrounding text (see `render_emoji_glyph()` in `app.py`). The `Dockerfile`
+  fetches this specific CBDT file directly from its source rather than trusting `apt`'s
+  `fonts-noto-color-emoji`, since which format that package ships wasn't verified and Homebrew's
+  current cask (used for local dev on macOS) has already moved to the broken COLR format.
+
 ## Environment variables
 
-| Var                | Default                       | Meaning                                          |
-|--------------------|--------------------------------|--------------------------------------------------|
-| `PHOTOPRISM_URL`   | `http://192.168.68.61:12342`  | Base URL of the PhotoPrism instance               |
-| `ADHOC_IMAGES_DIR` | `/data/adhoc_images`          | Mount point for extra local photo-source folders  |
-| `WIDTH`            | `800`                         | Output image width (E1002 panel width)            |
-| `HEIGHT`           | `480`                         | Output image height (E1002 panel height)          |
-| `FAVORITES_ONLY`   | `true`                        | Only pick PhotoPrism photos marked as favorite    |
-| `THUMB_SIZE`       | `fit_1920`                    | Which PhotoPrism thumbnail rendition to fetch     |
-| `CANDIDATE_COUNT`  | `25`                          | How many random PhotoPrism candidates to fetch per request before filtering to JPEG and picking one |
-| `PORT`             | `8090`                        | Port the Flask server listens on inside the container |
+| Var                 | Default                       | Meaning                                          |
+|---------------------|--------------------------------|--------------------------------------------------|
+| `PHOTOPRISM_URL`    | `http://192.168.68.61:12342`  | Base URL of the PhotoPrism instance               |
+| `ADHOC_IMAGES_DIR`  | `/data/adhoc_images`          | Mount point for extra local photo-source folders  |
+| `WIDTH`             | `800`                         | Output image width (E1002 panel width)            |
+| `HEIGHT`            | `480`                         | Output image height (E1002 panel height)          |
+| `FAVORITES_ONLY`    | `true`                        | Only pick PhotoPrism photos marked as favorite    |
+| `THUMB_SIZE`        | `fit_1920`                    | Which PhotoPrism thumbnail rendition to fetch     |
+| `CANDIDATE_COUNT`   | `25`                          | How many random PhotoPrism candidates to fetch per request before filtering to JPEG and picking one |
+| `TODOIST_API_TOKEN` | *(empty)*                     | Personal Todoist API token - `todos` dashboard source shows "not configured" if unset |
+| `PORT`              | `8090`                        | Port the Flask server listens on inside the container |
 
 ## Local testing (without Docker)
 
@@ -162,7 +225,8 @@ no docker-compose or registry needed.
      set here must match your **Volume/Folder mapping**'s mount path above, or the bridge will
      look in the wrong place and only ever see `photoprism` as a source. Override any of the
      other env vars from the table above too if needed (defaults already point at
-     `192.168.68.61:12342`, 800x480, favorites-only).
+     `192.168.68.61:12342`, 800x480, favorites-only) - set `TODOIST_API_TOKEN` here if you want
+     the `todos` dashboard source working (optional; it just shows "not configured" without one).
    - **Auto-restart**: enable, so it comes back up after a NAS reboot.
 6. Start the container.
 
@@ -179,10 +243,13 @@ curl -o dashboard0.png -w "HTTP %{http_code}, %{size_download} bytes\n" \
   "http://192.168.68.61:8090/dashboard.png?index=0"
 curl -o dashboard1.png -w "HTTP %{http_code}, %{size_download} bytes\n" \
   "http://192.168.68.61:8090/dashboard.png?index=1"
+curl -o dashboard2.png -w "HTTP %{http_code}, %{size_download} bytes\n" \
+  "http://192.168.68.61:8090/dashboard.png?index=2"
 ```
 
 `index=0` should always be PhotoPrism favorites / weather respectively; `index=1` should be your
-first `adhoc_images` subfolder / PhotoPrism stats. Each `photo.png` response should be an
+first `adhoc_images` subfolder / PhotoPrism stats; `index=2` for `dashboard.png` should be Todoist
+(or "not configured" if `TODOIST_API_TOKEN` isn't set). Each `photo.png` response should be an
 ~80-150KB, 800x480 PNG dithered into six pure colors (black, white, red, yellow, blue, green).
 Each `dashboard.png` response should be a much smaller (~5-10KB) text card. Repeated requests to
 the same index should return different random photos (photo sources) or fresh data (dashboard

@@ -1,6 +1,9 @@
 # ESPHome secrets (WiFi credentials, API/OTA/AP passwords) - never commit
 esphome/secrets.yaml
 
+# Bridge secrets (e.g. TODOIST_API_TOKEN) for local testing - never commit
+photo-frame-bridge/.env
+
 # ESPHome build artifacts
 esphome/.esphome/
 

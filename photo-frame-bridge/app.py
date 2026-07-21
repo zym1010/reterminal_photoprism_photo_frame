@@ -2,6 +2,7 @@ import io
 import logging
 import os
 import random
+import re
 from datetime import datetime, timedelta, timezone
 
 import pillow_avif  # noqa: F401  (registers AVIF support with Pillow on import)
@@ -26,7 +27,16 @@ REQUEST_TIMEOUT = 15
 # Dashboard sources are code (each needs its own fetch+render logic), unlike photo
 # sources which are just folders - adding one later means adding a branch in
 # render_dashboard_image() below and appending here.
-DASHBOARD_SOURCES = ["weather", "stats"]
+DASHBOARD_SOURCES = ["weather", "stats", "todos"]
+
+# The second (after weather) deliberately non-self-hosted piece: there's no
+# realistic self-hosted alternative to a task manager you actually use day to
+# day. Just a personal API token, no OAuth app/account needed. Note: the old
+# REST API v2 (/rest/v2/...) was retired in early 2026 (returns 410 Gone) in
+# favor of this unified /api/v1/ one - confirmed directly against the live API
+# since the docs describing it were inconsistent about the response shape.
+TODOIST_API_URL = "https://api.todoist.com/api/v1"
+TODOIST_API_TOKEN = os.environ.get("TODOIST_API_TOKEN", "")
 
 # The reTerminal E1002's epaper_spi driver does NOT do nearest-color matching
 # against a rich/measured palette. It classifies each pixel into one of 8 RGB-cube
@@ -90,6 +100,149 @@ WMO_CONDITIONS = {
     96: "Thunderstorm, hail",
     99: "Thunderstorm, heavy hail",
 }
+
+# Pillow's ImageFont.load_default() is a tiny built-in bitmap font with no CJK
+# (or broader Unicode) glyph coverage - confirmed by testing against real
+# Todoist task content containing Chinese text, which rendered as broken
+# missing-glyph boxes. WenQuanYi Micro Hei (installed via apt in the
+# Dockerfile - see requirements.txt/Dockerfile) covers both Latin and CJK, so
+# every card uses it consistently. Falls back to the bitmap default if the
+# font file isn't present (e.g. running app.py locally without Docker) rather
+# than crashing - degraded rendering, not a hard requirement, for local dev.
+FONT_PATH = os.environ.get("FONT_PATH", "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc")
+
+# Noto Color Emoji (installed via apt in the Dockerfile) - a *separate* font
+# from FONT_PATH above, since no single font file covers both CJK text and
+# color emoji glyphs, and Pillow has no automatic font-fallback mechanism
+# (unlike a browser or native text layout engine) - mixed text has to be
+# manually split into runs and each run drawn with the right font. See
+# split_text_runs()/draw_mixed_text() below.
+EMOJI_FONT_PATH = os.environ.get("EMOJI_FONT_PATH", "/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf")
+
+# Common emoji Unicode ranges, plus variation selector (FE0F, forces
+# emoji-style rendering of the preceding character) and ZWJ (200D, joins
+# multiple codepoints into one compound emoji e.g. family/skin-tone variants).
+# Not exhaustive of every Unicode emoji block that will ever be assigned, but
+# covers everything in practice found in real Todoist task content.
+EMOJI_RE = re.compile(
+    "["
+    "\U0001F300-\U0001FAFF"
+    "\U00002600-\U000027BF"
+    "\U0001F1E6-\U0001F1FF"
+    "\U00002B00-\U00002BFF"
+    "\U00002300-\U000023FF"
+    "\U0000FE0F"
+    "\U0000200D"
+    "]+"
+)
+
+
+def load_font(size):
+    if os.path.exists(FONT_PATH):
+        return ImageFont.truetype(FONT_PATH, size)
+    return ImageFont.load_default(size=size)
+
+
+# Noto Color Emoji ships color glyphs as CBDT bitmap "strikes" at one fixed
+# pixel size (confirmed by inspecting the font's CBLC table directly - this
+# build only has a single 109px strike). Pillow can only load a CBDT font at
+# one of its actual strike sizes - anything else raises "invalid pixel size" -
+# so glyphs have to be rendered at that native size and then scaled down to
+# match the surrounding text, rather than requested at an arbitrary size like
+# every other font here. Also confirmed empirically: a *different* Noto Color
+# Emoji build using the newer COLR/CPAL vector format renders nothing at all
+# in this Pillow/FreeType combination (zero-height bbox, no error) - CBDT is
+# the one that actually works.
+_EMOJI_NATIVE_SIZE = None
+
+
+def emoji_native_size():
+    global _EMOJI_NATIVE_SIZE
+    if _EMOJI_NATIVE_SIZE is None and os.path.exists(EMOJI_FONT_PATH):
+        for candidate in (109, 136, 128, 96, 64, 32):
+            try:
+                ImageFont.truetype(EMOJI_FONT_PATH, candidate)
+                _EMOJI_NATIVE_SIZE = candidate
+                break
+            except OSError:
+                continue
+    return _EMOJI_NATIVE_SIZE
+
+
+def load_emoji_font():
+    size = emoji_native_size()
+    if size is None:
+        return None
+    return ImageFont.truetype(EMOJI_FONT_PATH, size)
+
+
+def render_emoji_glyph(emoji_font, run, target_height):
+    """Renders `run` at the font's native (fixed) strike size, crops to the
+    glyph's actual ink, and scales down to `target_height` to match the
+    surrounding text's line height. Returns None if the font has no glyph for
+    this run (rare, but a font update could drop something) rather than
+    raising - missing an emoji is fine, crashing the whole card isn't.
+    """
+    size = emoji_font.size
+    tmp = Image.new("RGBA", (size * 2, size * 2), (0, 0, 0, 0))
+    ImageDraw.Draw(tmp).text((0, 0), run, font=emoji_font, embedded_color=True)
+    bbox = tmp.getbbox()
+    if bbox is None:
+        return None
+    cropped = tmp.crop(bbox)
+    scale = target_height / cropped.height
+    new_size = (max(1, round(cropped.width * scale)), max(1, round(cropped.height * scale)))
+    return cropped.resize(new_size, Image.LANCZOS)
+
+
+def split_text_runs(text):
+    """Splits into (substring, is_emoji) runs for mixed-font rendering."""
+    runs = []
+    pos = 0
+    for m in EMOJI_RE.finditer(text):
+        if m.start() > pos:
+            runs.append((text[pos : m.start()], False))
+        runs.append((text[m.start() : m.end()], True))
+        pos = m.end()
+    if pos < len(text):
+        runs.append((text[pos:], False))
+    return runs
+
+
+def mixed_text_width(draw, text, font, emoji_font, emoji_height):
+    if emoji_font is None:
+        return draw.textlength(text, font=font)
+    total = 0
+    for run, is_emoji in split_text_runs(text):
+        if is_emoji:
+            glyph = render_emoji_glyph(emoji_font, run, emoji_height)
+            total += glyph.width if glyph is not None else 0
+        else:
+            total += draw.textlength(run, font=font)
+    return total
+
+
+def draw_mixed_text(img, draw, xy, text, font, emoji_font, fill, emoji_height, stroke_width=0):
+    """Draws `text` left-aligned at `xy`, using `emoji_font` (color, scaled to
+    `emoji_height`) for emoji runs and `font` (regular fill color) for
+    everything else. Falls back to plain single-font rendering if `emoji_font`
+    is None (not installed - see load_emoji_font()) rather than crashing.
+    Needs the base `img` (not just `draw`) to paste scaled emoji bitmaps.
+    """
+    if emoji_font is None:
+        draw.text(xy, text, font=font, fill=fill, stroke_width=stroke_width, stroke_fill=fill)
+        return
+    x, y = xy
+    for run, is_emoji in split_text_runs(text):
+        if is_emoji:
+            glyph = render_emoji_glyph(emoji_font, run, emoji_height)
+            if glyph is not None:
+                img.paste(glyph, (round(x), round(y)), glyph)
+                x += glyph.width
+        else:
+            draw.text((x, y), run, font=font, fill=fill, stroke_width=stroke_width, stroke_fill=fill)
+            x += draw.textlength(run, font=font)
+
 
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -264,8 +417,8 @@ def format_last_added(iso_ts):
 def render_stats_image(counts, last_added, added_recent):
     img = Image.new("RGB", (WIDTH, HEIGHT), (255, 255, 255))
     draw = ImageDraw.Draw(img)
-    title_font = ImageFont.load_default(size=44)
-    label_font = ImageFont.load_default(size=30)
+    title_font = load_font(44)
+    label_font = load_font(30)
 
     margin = 40
     draw.text((margin, margin), "PhotoPrism Library", font=title_font, fill=(0, 0, 0))
@@ -329,9 +482,9 @@ def fetch_weather(name, lat, lon):
 def render_weather_image(results):
     img = Image.new("RGB", (WIDTH, HEIGHT), (255, 255, 255))
     draw = ImageDraw.Draw(img)
-    title_font = ImageFont.load_default(size=44)
-    city_font = ImageFont.load_default(size=34)
-    detail_font = ImageFont.load_default(size=28)
+    title_font = load_font(44)
+    city_font = load_font(34)
+    detail_font = load_font(28)
 
     margin = 40
     draw.text((margin, margin), "Weather", font=title_font, fill=(0, 0, 0))
@@ -353,12 +506,195 @@ def render_weather_image(results):
     return img
 
 
+def fetch_todoist_tasks():
+    """All active (incomplete) tasks, sorted with undated tasks first, then
+    dated tasks by due date ascending (each group by priority descending as a
+    tiebreak) - per an explicit ask to show a general list rather than only
+    today/overdue, with undated tasks surfaced first rather than buried last.
+
+    Earlier version of this filtered server-side to "today | overdue" via
+    Todoist's filter query language. Two things learned the hard way while
+    building that: GET /tasks accepts a "filter" query param without erroring
+    but silently ignores it (confirmed directly - "overdue", "today", and even
+    a nonsense string all returned the identical full task list); the real
+    filter endpoint is the separate /tasks/filter with a "query" param. Both
+    are now moot for this specific card (no filtering happens here anymore),
+    but left documented in case a future filtered view is wanted again.
+    """
+    headers = {"Authorization": f"Bearer {TODOIST_API_TOKEN}"}
+    tasks = []
+    cursor = None
+    # Cursor-paginated ({"results": [...], "next_cursor": ...}), not a bare
+    # array. A personal task list is never going to be huge, but follow the
+    # cursor properly anyway rather than silently truncating someone's real
+    # list.
+    for _ in range(10):  # sane upper bound, not an expected real-world case
+        params = {"cursor": cursor} if cursor else {}
+        resp = requests.get(f"{TODOIST_API_URL}/tasks", headers=headers, params=params, timeout=REQUEST_TIMEOUT)
+        resp.raise_for_status()
+        data = resp.json()
+        tasks.extend(data["results"])
+        cursor = data.get("next_cursor")
+        if not cursor:
+            break
+
+    def sort_key(task):
+        due = task.get("due")
+        has_due = 1 if due else 0
+        due_date = due.get("date", "") if due else ""
+        return (has_due, due_date, -task.get("priority", 1))
+
+    tasks.sort(key=sort_key)
+    return tasks
+
+
+MARKDOWN_LINK_RE = re.compile(r"\[([^\]]*)\]\([^)]*\)")
+
+
+def strip_markdown_links(text):
+    """Todoist task content can contain markdown links (e.g. its own default
+    onboarding tasks do, like "[Watch](https://...)") - shown as the link text
+    only, since there's no way to make raw URL text useful on an e-ink card.
+    """
+    return MARKDOWN_LINK_RE.sub(r"\1", text)
+
+
+def truncate_mixed_to_width(draw, text, font, emoji_font, emoji_height, max_width):
+    if mixed_text_width(draw, text, font, emoji_font, emoji_height) <= max_width:
+        return text
+    while text and mixed_text_width(draw, text + "…", font, emoji_font, emoji_height) > max_width:
+        text = text[:-1]
+    return text + "…"
+
+
+def render_todos_image(tasks):
+    """`tasks=None` means Todoist isn't configured; `[]` means configured but
+    nothing active; a pure function of its argument otherwise (doesn't look at
+    TODOIST_API_TOKEN itself) so it's easy to test/preview without a real token.
+
+    Layout follows TRMNL's own Todoist plugin (a user-provided reference
+    screenshot, not just the product page): a numbered flat list, bold task
+    name, due date on its own line below with a thin underline, no
+    project/section grouping. Deliberately not literally monochrome like that
+    reference, though - since this panel actually has color, overdue tasks are
+    red and high-priority ones are blue, on top of the borrowed layout.
+    """
+    img = Image.new("RGB", (WIDTH, HEIGHT), (255, 255, 255))
+    draw = ImageDraw.Draw(img)
+    title_font = load_font(38)
+    task_font = load_font(26)
+    due_font = load_font(18)
+    index_font = load_font(16)
+    emoji_font = load_emoji_font()
+    emoji_height = 28  # matches task_font's approximate line height
+
+    margin = 40
+    draw.text((margin, margin), "To-Do", font=title_font, fill=(0, 0, 0))
+    draw.line((margin, margin + 48, WIDTH - margin, margin + 48), fill=(0, 0, 0), width=2)
+
+    if tasks is None:
+        draw.text((margin, margin + 72), "Todoist not configured (TODOIST_API_TOKEN)", font=task_font, fill=(0, 0, 0))
+        return img
+    if not tasks:
+        draw.text((margin, margin + 72), "Nothing to do", font=task_font, fill=(0, 0, 0))
+        return img
+
+    top = margin + 72
+    bottom = HEIGHT - margin
+    row_height_with_due = 56
+    row_height_no_due = 32
+    index_col_width = 32
+    today_iso = datetime.now(timezone.utc).date().isoformat()
+
+    # Two columns rather than one, to fit noticeably more tasks per screen -
+    # each filled top-to-bottom before moving to the next (like a newspaper),
+    # not interleaved, so the sort order (see fetch_todoist_tasks() - undated
+    # first, then by due date) still reads top-to-bottom-then-across.
+    column_gap = 30
+    column_width = (WIDTH - 2 * margin - column_gap) // 2
+    col1_x = margin
+    col2_x = margin + column_width + column_gap
+
+    def row_height_for(task):
+        return row_height_with_due if task.get("due") else row_height_no_due
+
+    def draw_task_row(x, y, index, task):
+        due = task.get("due")
+        overdue = bool(due) and due.get("date", "")[:10] < today_iso
+        urgent = task.get("priority", 1) >= 3
+        # Colors are restricted to DEVICE_PALETTE's pure primaries deliberately
+        # (see "Dithering: idealized colors, not realistic ones" in the
+        # README) - an off-palette color, including grays, gets
+        # Atkinson-dithered into a speckled mix of pixels for thin strokes/
+        # lines instead of rendering as a clean color. Confirmed directly: a
+        # light-gray divider line and gray secondary text looked fine
+        # pre-dither and were nearly invisible/rough post-dither. Pure black
+        # is the only safe "de-emphasized" choice here - visual hierarchy
+        # comes from size/weight instead (index/due text are smaller, due
+        # text isn't bold).
+        color = (255, 0, 0) if overdue else ((0, 0, 255) if urgent else (0, 0, 0))
+
+        draw.text((x, y + 4), str(index), font=index_font, fill=(0, 0, 0))
+
+        text_x = x + index_col_width
+        content = strip_markdown_links(task["content"])
+        max_width = x + column_width - text_x
+        text = truncate_mixed_to_width(draw, content, task_font, emoji_font, emoji_height, max_width)
+        # Faux-bold via stroke - the bundled CJK font (see FONT_PATH) only
+        # ships one weight, no separate bold file.
+        draw_mixed_text(img, draw, (text_x, y), text, task_font, emoji_font, color, emoji_height, stroke_width=1)
+
+        if due and due.get("string"):
+            due_text = f"due {due['string']}"
+            due_y = y + 30
+            draw.text((text_x, due_y), due_text, font=due_font, fill=(0, 0, 0))
+            due_width = draw.textlength(due_text, font=due_font)
+            draw.line((text_x, due_y + 20, text_x + due_width, due_y + 20), fill=(0, 0, 0), width=1)
+
+    # Packed dynamically rather than a fixed row count per column, since
+    # undated tasks take less vertical space than dated ones (no due-date
+    # line/underline needed) - a fixed-height slice would waste that space.
+    idx = 0
+    col_ys = []
+    col_counts = []
+    for col_x in (col1_x, col2_x):
+        y = top
+        count = 0
+        while idx < len(tasks):
+            row_height = row_height_for(tasks[idx])
+            if y + row_height > bottom:
+                break
+            draw_task_row(col_x, y, idx + 1, tasks[idx])
+            y += row_height
+            idx += 1
+            count += 1
+        col_ys.append(y)
+        col_counts.append(count)
+
+    if col_counts[1] > 0:
+        draw.line((col2_x - column_gap // 2, top, col2_x - column_gap // 2, max(col_ys)), fill=(0, 0, 0), width=1)
+
+    remaining = len(tasks) - idx
+    if remaining > 0:
+        # Wherever there's room for one more (short) line - prefer column 2
+        # since it's the one more likely to have leftover space.
+        for col_x, y in ((col2_x, col_ys[1]), (col1_x, col_ys[0])):
+            if y + row_height_no_due <= bottom:
+                draw.text((col_x, y), f"+ {remaining} more", font=task_font, fill=(0, 0, 0))
+                break
+
+    return img
+
+
 def render_dashboard_image(index):
     """Dispatch to the dashboard source at `index` (wrapping around DASHBOARD_SOURCES)."""
     source = DASHBOARD_SOURCES[index % len(DASHBOARD_SOURCES)]
     if source == "weather":
         results = [fetch_weather(name, lat, lon) for name, lat, lon in WEATHER_LOCATIONS]
         return source, render_weather_image(results)
+    if source == "todos":
+        tasks = fetch_todoist_tasks() if TODOIST_API_TOKEN else None
+        return source, render_todos_image(tasks)
     counts, last_added, added_recent = fetch_library_stats()
     return source, render_stats_image(counts, last_added, added_recent)
 
