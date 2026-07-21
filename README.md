@@ -30,6 +30,10 @@ manager you actually already use).
   button refreshes whichever is showing (new random photo, or fresh dashboard data - same
   source, no cycling); the two white buttons each cycle to the next source in their category. No
   Home Assistant, no cloud SaaS - the device talks directly to the bridge over the LAN.
+- **`device-log-capture/`** - small always-on service that connects to the device's own ESPHome
+  API (the same connection `esphome logs` uses) and persists everything to a rotating log file on
+  the NAS, since neither the ESPHome CLI nor its Dashboard keep logs around once you close the
+  window.
 
 See each subdirectory's README for setup/deployment details.
 

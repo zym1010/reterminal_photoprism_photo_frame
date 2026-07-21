@@ -4,6 +4,9 @@ esphome/secrets.yaml
 # Bridge secrets (e.g. TODOIST_API_TOKEN) for local testing - never commit
 photo-frame-bridge/.env
 
+# device-log-capture secrets (DEVICE_API_KEY) for local testing - never commit
+device-log-capture/.env
+
 # ESPHome build artifacts
 esphome/.esphome/
 
