@@ -37,6 +37,8 @@ EXPOSE 8090
 
 ENV PHOTOPRISM_URL=http://192.168.68.61:12342 \
     ADHOC_IMAGES_DIR=/data/adhoc_images \
+    KID_PHOTOS_DIR=/data/kid_photos \
+    KID_PHOTOS_RECENCY_HALF_LIFE_DAYS=60 \
     WIDTH=800 \
     HEIGHT=480 \
     FAVORITES_ONLY=true \
