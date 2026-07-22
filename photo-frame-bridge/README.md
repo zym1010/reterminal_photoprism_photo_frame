@@ -4,9 +4,10 @@ Small self-hosted service with two generic, index-based endpoints:
 
 - `GET /photo.png?index=N` → a random photo from photo source `N` (server picks
   `sources[N % len(sources)]`), cropped to 800x480 and dithered to the reTerminal E1002's 6
-  native ink colors. Sources: `["photoprism"]` (PhotoPrism favorites) plus every immediate
-  subfolder of the `adhoc_images` mount (see below) - discovered fresh on every request, so
-  dropping a new folder into the mount adds a source with no redeploy needed.
+  native ink colors. Sources: `["photoprism"]` (PhotoPrism favorites), then `"kid_photos"` (a
+  dated-folder archive, see below) if mounted, then every immediate subfolder of the
+  `adhoc_images` mount (see below) - discovered fresh on every request, so dropping a new folder
+  into the mount adds a source with no redeploy needed.
 - `GET /dashboard.png?index=N` → dashboard source `N` (weather, PhotoPrism library stats, ...),
   also rendered as an image using the same pipeline.
 
@@ -25,16 +26,68 @@ rewritten at runtime.
 
 `ADHOC_IMAGES_DIR` (default `/data/adhoc_images`) is meant to be a NAS shared folder mounted into
 the container. Every **immediate** subfolder becomes a photo source automatically - e.g. mount a
-shared folder containing a `kid_photos/` subfolder, and `kid_photos` shows up as source 1 (source
-0 is always `photoprism`) without touching any code. Adding a third source later is just: create
-another top-level subfolder. Within a source, images are picked recursively from any depth of
-further nesting (e.g. `kid_photos/2026/vacation/photo.jpg` counts as part of the `kid_photos`
-source, not a separate one) - organize each source's folder however you like on disk. NAS
-housekeeping folders (`@eaDir`, `#recycle`, dotfolders) are skipped at every level.
+shared folder containing a `family_reunion/` subfolder, and `family_reunion` shows up as a source
+(after `photoprism`, and after `kid_photos` if that's also mounted - see below) without touching
+any code. Adding another source later is just: create another top-level subfolder. Within a
+source, images are picked *uniformly at random* from any depth of further nesting (e.g.
+`family_reunion/2026/vacation/photo.jpg` counts as part of the `family_reunion` source, not a
+separate one) - organize each source's folder however you like on disk. NAS housekeeping folders
+(`@eaDir`, `#recycle`, dotfolders) are skipped at every level. This plain recursive/uniform pick is
+the right fit for a source with no natural "recency" structure to weight by - contrast with
+`kid_photos` below, which has one (a date per top-level folder) and weights on it deliberately.
 
 Supported formats: JPEG, PNG, WEBP, AVIF, BMP, TIFF, HEIC/HEIF (AVIF needs the
 `pillow-avif-plugin` dependency already in `requirements.txt` - stock Pillow doesn't decode AVIF
 on its own).
+
+## Photo source: `kid_photos` — a dated-folder archive, recency-weighted
+
+`KID_PHOTOS_DIR` (default `/data/kid_photos`) is meant to be a second NAS shared folder mounted
+into the container, for archives that are already organized as one folder per day - e.g. a
+Procare media export, laid out as:
+
+```
+kid_photos/
+  2026-05-11/
+    photos/
+      71663a71-...jpg
+      71663a71-...xmp          (sidecar metadata - ignored, not an image extension)
+    videos/
+      open-uri...mp4           (ignored entirely - not part of this source)
+  2026-05-12/
+    photos/
+      ...
+```
+
+If `KID_PHOTOS_DIR` exists, `"kid_photos"` is always source 1 (right after `photoprism`), before
+any `adhoc_images` subfolders. Only immediate subfolders literally named `YYYY-MM-DD` count as
+date folders, and only their `photos/` subfolder (searched recursively, in case of further
+nesting within a day) is scanned for candidates - a sibling `videos/` folder is excluded by
+construction, not just by file extension, so this stays a photos-only source even if it someday
+contained a stray non-`.mp4` file.
+
+**Selection is a deliberate two-stage weighted pick, not a single flat random choice over every
+file:**
+
+1. **Pick a date**, with each date folder weighted by an exponential-decay function of its age in
+   days: `weight = 0.5 ** (age_days / KID_PHOTOS_RECENCY_HALF_LIFE_DAYS)`. `KID_PHOTOS_RECENCY_HALF_LIFE_DAYS`
+   (default `60`) is the number of days after which a date's weight is cut in half - e.g. with the
+   default, a photo from 60 days ago is half as likely to have its date picked as one from today;
+   from 120 days ago, a quarter as likely; and so on, with no hard cutoff (very old dates are
+   still reachable, just increasingly rare). Lower the value to skew harder toward recent days;
+   raise it to flatten the bias toward uniform. Dates whose `photos/` folder has zero images are
+   dropped before weighting, not just assigned a zero weight, so an all-video day can never be
+   "selected" and come up empty.
+2. **Then pick a photo uniformly at random from that date's `photos/` folder.**
+
+This is deliberately *not* the same as assigning every individual photo a weight and picking from
+the flattened list of all photos - that alternative would let a date with hundreds of photos
+dominate the odds purely by photo count, on top of (or even instead of) its recency, and would let
+a date with only one or two photos vanish into the noise regardless of how recent it is. Weighting
+*dates* first and only then picking uniformly within the winning date keeps recency as the single
+knob that matters, independent of how many photos happen to exist for any given day. The date used
+for weighting is the folder name itself (`YYYY-MM-DD`) - not EXIF or file-mtime - since this
+downloader's own exports don't reliably set either.
 
 ## Dithering: idealized colors, not "realistic" ones
 
@@ -163,6 +216,8 @@ rendering, not discoverable from docs alone:
 |---------------------|--------------------------------|--------------------------------------------------|
 | `PHOTOPRISM_URL`    | `http://192.168.68.61:12342`  | Base URL of the PhotoPrism instance               |
 | `ADHOC_IMAGES_DIR`  | `/data/adhoc_images`          | Mount point for extra local photo-source folders  |
+| `KID_PHOTOS_DIR`    | `/data/kid_photos`            | Mount point for the dated-folder `kid_photos` source |
+| `KID_PHOTOS_RECENCY_HALF_LIFE_DAYS` | `60`         | Days after which a date's selection weight halves in `kid_photos` - lower skews harder toward recent days |
 | `WIDTH`             | `800`                         | Output image width (E1002 panel width)            |
 | `HEIGHT`            | `480`                         | Output image height (E1002 panel height)          |
 | `FAVORITES_ONLY`    | `true`                        | Only pick PhotoPrism photos marked as favorite    |
@@ -189,6 +244,14 @@ directory containing subfolders of images:
 ADHOC_IMAGES_DIR=/path/to/some/folder .venv/bin/python app.py
 ```
 
+To test `kid_photos`, point `KID_PHOTOS_DIR` at a real directory laid out as
+`YYYY-MM-DD/photos/*.jpg`:
+
+```bash
+KID_PHOTOS_DIR=/path/to/dated/archive .venv/bin/python app.py
+curl -o photo1.png "http://127.0.0.1:8090/photo.png?index=1"   # kid_photos is source 1
+```
+
 ## Build the Docker image
 
 Build for the NAS's CPU architecture. Most Synology models are `linux/amd64`; if yours is
@@ -211,8 +274,11 @@ no docker-compose or registry needed.
 2. Copy `photo-frame-bridge.tar` to the NAS (File Station or `scp`).
 3. In DSM **Container Manager → Image → Add → Add From File**, select the tarball to import it.
 4. Create a NAS shared folder for extra photo sources (e.g. `adhoc_images`), and inside it a
-   subfolder per source (e.g. `adhoc_images/kid_photos/`). Upload images into those subfolders
-   via File Station whenever you want to add more - no container changes needed.
+   subfolder per source (e.g. `adhoc_images/family_reunion/`). Upload images into those subfolders
+   via File Station whenever you want to add more - no container changes needed. If you also have
+   a dated-folder archive for the `kid_photos` source (see above), create a *separate* NAS shared
+   folder for it (e.g. `kid_photos`, containing the `YYYY-MM-DD/photos/...` structure directly at
+   its top level) - keep it separate from `adhoc_images` since it mounts to its own container path.
 5. **Container Manager → Container → Create**, pick the imported `photo-frame-bridge:latest`
    image, and configure:
    - **Port Settings**: map a **fixed** local port (e.g. `8090`) to container port `8090`.
@@ -221,13 +287,16 @@ no docker-compose or registry needed.
      since it hardcodes the URL/port. Set it explicitly.
    - **Volume/Folder mapping**: mount the `adhoc_images` shared folder from step 4 to
      `/data/adhoc_images` inside the container (read-only is fine, the bridge never writes to it).
-   - **Environment variables**: `ADHOC_IMAGES_DIR` is baked into the image (declared in the
-     `Dockerfile`), so it'll already show up in DSM's Environment tab set to `/data/adhoc_images`
-     - edit it there if you'd rather mount to a different container path, but whatever value you
-     set here must match your **Volume/Folder mapping**'s mount path above, or the bridge will
-     look in the wrong place and only ever see `photoprism` as a source. Override any of the
-     other env vars from the table above too if needed (defaults already point at
-     `192.168.68.61:12342`, 800x480, favorites-only) - set `TODOIST_API_TOKEN` here if you want
+     If using `kid_photos`, also mount that shared folder to `/data/kid_photos`.
+   - **Environment variables**: `ADHOC_IMAGES_DIR` and `KID_PHOTOS_DIR` are baked into the image
+     (declared in the `Dockerfile`), so they'll already show up in DSM's Environment tab set to
+     `/data/adhoc_images` and `/data/kid_photos` respectively - edit them there if you'd rather
+     mount to different container paths, but whatever value you set here must match your
+     **Volume/Folder mapping**'s mount path above, or the bridge will look in the wrong place (for
+     `ADHOC_IMAGES_DIR`, that means only ever seeing `photoprism` and, if mounted, `kid_photos` as
+     sources; for `KID_PHOTOS_DIR`, that means `kid_photos` never appearing as a source at all).
+     Override any of the other env vars from the table above too if needed (defaults already point
+     at `192.168.68.61:12342`, 800x480, favorites-only) - set `TODOIST_API_TOKEN` here if you want
      the `todos` dashboard source working (optional; it just shows "not configured" without one).
    - **Auto-restart**: enable, so it comes back up after a NAS reboot.
 6. Start the container.
@@ -249,13 +318,16 @@ curl -o dashboard2.png -w "HTTP %{http_code}, %{size_download} bytes\n" \
   "http://192.168.68.61:8090/dashboard.png?index=2"
 ```
 
-`index=0` should always be PhotoPrism favorites / weather respectively; `index=1` should be your
-first `adhoc_images` subfolder / PhotoPrism stats; `index=2` for `dashboard.png` should be Todoist
-(or "not configured" if `TODOIST_API_TOKEN` isn't set). Each `photo.png` response should be an
-~80-150KB, 800x480 PNG dithered into six pure colors (black, white, red, yellow, blue, green).
-Each `dashboard.png` response should be a much smaller (~5-10KB) text card. Repeated requests to
-the same index should return different random photos (photo sources) or fresh data (dashboard
-sources).
+`index=0` should always be PhotoPrism favorites / weather respectively; `index=1` should be
+`kid_photos` if `KID_PHOTOS_DIR` is mounted, otherwise your first `adhoc_images` subfolder /
+PhotoPrism stats; `index=2` for `dashboard.png` should be Todoist (or "not configured" if
+`TODOIST_API_TOKEN` isn't set). Each `photo.png` response should be an ~80-150KB, 800x480 PNG
+dithered into six pure colors (black, white, red, yellow, blue, green). Each `dashboard.png`
+response should be a much smaller (~5-10KB) text card. Repeated requests to the same index should
+return different random photos (photo sources) or fresh data (dashboard sources) - for
+`kid_photos` specifically, repeat the request several times and confirm most (not all) responses
+come from recent dates (check `docker logs` for `Serving photo from source 'kid_photos'`, which
+doesn't log the picked date directly, so cross-check by eye that photos generally look recent).
 
 `GET /healthz` returns `ok` and can be used as a container health check.
 
@@ -264,7 +336,14 @@ sources).
 - **`HTTP 503` from `/photo.png`**: the resolved source had no usable images - for `photoprism`,
   check `docker logs` and confirm favorited photos with `Mime: image/jpeg` exist; for an
   `adhoc_images` subfolder, confirm it actually contains files with a supported extension and
-  that the volume mount is correct (`docker exec <container> ls /data/adhoc_images`).
+  that the volume mount is correct (`docker exec <container> ls /data/adhoc_images`); for
+  `kid_photos`, confirm at least one `YYYY-MM-DD/photos/` subfolder exists and actually contains
+  image files (not just `videos/` or sidecar `.xmp`/`.json` files) and that the volume mount is
+  correct (`docker exec <container> ls /data/kid_photos`).
+- **`kid_photos` never shows up as a source at all** (as opposed to showing up but returning
+  `503`): `KID_PHOTOS_DIR` doesn't exist inside the container - almost always a missing or
+  mismatched volume mount, not a code issue (see `list_photo_sources()` in `app.py`, which only
+  adds `"kid_photos"` when `os.path.isdir(KID_PHOTOS_DIR)` is true).
 - **`HTTP 502`**: fetching/processing the chosen source failed — check `docker logs` for the
   underlying error (e.g. PhotoPrism unreachable, corrupt image file, weather API unreachable).
 - **A new `adhoc_images` subfolder never shows up**: subfolders are sorted alphabetically after

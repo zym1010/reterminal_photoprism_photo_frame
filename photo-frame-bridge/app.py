@@ -27,6 +27,20 @@ ADHOC_IMAGES_DIR = os.environ.get("ADHOC_IMAGES_DIR", "/data/adhoc_images")
 LOCAL_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".avif", ".bmp", ".tiff", ".heic", ".heif"}
 REQUEST_TIMEOUT = 15
 
+# Also mounted on the NAS side: a Procare-style kid-photo archive, dated by folder
+# hierarchy rather than EXIF/mtime (a Procare export's own timestamps aren't
+# reliably set) - immediate subfolders are named "YYYY-MM-DD", each with its own
+# "photos" (and sibling "videos") subfolder. Candidates are pulled only from
+# "<date>/photos/", recursively - not the whole date folder - so "<date>/videos/"
+# is excluded by construction rather than relying on extension filtering alone.
+# Always source 1 (right after "photoprism") when this directory exists, same
+# "no redeploy needed" spirit as ADHOC_IMAGES_DIR above.
+KID_PHOTOS_DIR = os.environ.get("KID_PHOTOS_DIR", "/data/kid_photos")
+# Exponential-decay half-life (in days) for recency weighting - see
+# pick_random_kid_photo() below. Smaller = more strongly favors recent photos.
+KID_PHOTOS_RECENCY_HALF_LIFE_DAYS = float(os.environ.get("KID_PHOTOS_RECENCY_HALF_LIFE_DAYS", "60"))
+KID_PHOTOS_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
 # Dashboard sources are code (each needs its own fetch+render logic), unlike photo
 # sources which are just folders - adding one later means adding a branch in
 # render_dashboard_image() below and appending here.
@@ -260,13 +274,16 @@ def render_to_png(img):
 
 
 def list_photo_sources():
-    """"photoprism" plus every immediate subfolder of ADHOC_IMAGES_DIR, sorted.
+    """"photoprism", then "kid_photos" (if KID_PHOTOS_DIR exists), then every
+    immediate subfolder of ADHOC_IMAGES_DIR, sorted.
 
     Skips folders starting with "@", "#", or "." - NAS-internal housekeeping
     folders (e.g. Synology's "@eaDir" thumbnail cache and "#recycle" bin), not
     real photo sources.
     """
     sources = ["photoprism"]
+    if os.path.isdir(KID_PHOTOS_DIR):
+        sources.append("kid_photos")
     if os.path.isdir(ADHOC_IMAGES_DIR):
         sources.extend(
             sorted(
@@ -318,30 +335,96 @@ def fetch_and_process(photo):
     return render_to_png(fitted)
 
 
-def pick_random_local_image(source):
-    """Random image from anywhere under this source's folder, recursively.
+def list_images_recursive(folder):
+    """Every image file (by extension) anywhere under `folder`, at any depth.
 
-    The source is the immediate subfolder (e.g. "kid_photos"), but images can
-    live in nested sub-subfolders under it - those all still count as the same
-    source, just organized however you like on disk.
+    Skips folders starting with "@", "#", or "." at every level - NAS-internal
+    housekeeping folders (e.g. Synology's "@eaDir" thumbnail cache and
+    "#recycle" bin), not real content.
     """
-    folder = os.path.join(ADHOC_IMAGES_DIR, source)
     files = []
     for dirpath, dirnames, filenames in os.walk(folder):
         dirnames[:] = [d for d in dirnames if not d.startswith(("@", "#", "."))]
         files.extend(
             os.path.join(dirpath, f) for f in filenames if os.path.splitext(f)[1].lower() in LOCAL_IMAGE_EXTENSIONS
         )
+    return files
+
+
+def pick_random_local_image(source):
+    """Random image from anywhere under this source's folder, recursively.
+
+    The source is the immediate subfolder (e.g. "family_reunion"), but images
+    can live in nested sub-subfolders under it - those all still count as the
+    same source, just organized however you like on disk.
+    """
+    folder = os.path.join(ADHOC_IMAGES_DIR, source)
+    files = list_images_recursive(folder)
     return random.choice(files) if files else None
+
+
+def list_kid_photo_date_folders():
+    """(date, photos_dir) for every immediate subfolder of KID_PHOTOS_DIR named
+    "YYYY-MM-DD" that has a "photos" subfolder - i.e. only the date-named
+    top-level folders this archive actually uses, and only the "photos"
+    branch of each (siblings like "videos" are a different source of candidate
+    files, not photos, so they're excluded by construction rather than relying
+    solely on extension filtering).
+    """
+    folders = []
+    for name in os.listdir(KID_PHOTOS_DIR):
+        if not KID_PHOTOS_DATE_RE.match(name):
+            continue
+        try:
+            date = datetime.strptime(name, "%Y-%m-%d").date()
+        except ValueError:
+            continue
+        photos_dir = os.path.join(KID_PHOTOS_DIR, name, "photos")
+        if os.path.isdir(photos_dir):
+            folders.append((date, photos_dir))
+    return folders
+
+
+def pick_random_kid_photo():
+    """Recency-weighted random photo from KID_PHOTOS_DIR.
+
+    Two-stage pick - a date folder first (weighted by exponential decay on its
+    age, via KID_PHOTOS_RECENCY_HALF_LIFE_DAYS), then a uniformly random photo
+    within that date's "photos" folder. Two stages rather than one flat
+    weighted pick over every file, so a date with hundreds of photos doesn't
+    drown out one with only a handful - each date competes as a single unit,
+    then contributes its own photos equally. Dates with no actual photo files
+    (e.g. a day that only has videos) are dropped before weighting, not just
+    given zero weight, so they can never "win" and return None.
+    """
+    today = datetime.now().date()
+    candidates = []
+    weights = []
+    for date, photos_dir in list_kid_photo_date_folders():
+        images = list_images_recursive(photos_dir)
+        if not images:
+            continue
+        age_days = max(0, (today - date).days)
+        weight = 0.5 ** (age_days / KID_PHOTOS_RECENCY_HALF_LIFE_DAYS)
+        candidates.append(images)
+        weights.append(weight)
+    if not candidates:
+        return None
+    images = random.choices(candidates, weights=weights, k=1)[0]
+    return random.choice(images)
+
+
+def fetch_and_process_path(path):
+    img = flatten_to_rgb(Image.open(path))
+    fitted = ImageOps.fit(img, (WIDTH, HEIGHT), method=Image.LANCZOS, centering=(0.5, 0.5))
+    return render_to_png(fitted)
 
 
 def fetch_and_process_local(source):
     path = pick_random_local_image(source)
     if path is None:
         return None
-    img = flatten_to_rgb(Image.open(path))
-    fitted = ImageOps.fit(img, (WIDTH, HEIGHT), method=Image.LANCZOS, centering=(0.5, 0.5))
-    return render_to_png(fitted)
+    return fetch_and_process_path(path)
 
 
 def render_photo_image(index):
@@ -354,6 +437,11 @@ def render_photo_image(index):
         if photo is None:
             return source, None
         return source, fetch_and_process(photo)
+    if source == "kid_photos":
+        path = pick_random_kid_photo()
+        if path is None:
+            return source, None
+        return source, fetch_and_process_path(path)
     return source, fetch_and_process_local(source)
 
 
