@@ -43,11 +43,15 @@
 ## (ext1, see deep_sleep: below) - see on_boot for how it figures out which
 ## button caused the wake and replicates that button's normal on_press body,
 ## since the actual GPIO edge happened while the CPU was powered off and can't
-## be observed after the fact. Traded away: every press now pays a full
-## WiFi-reconnect-from-scratch cost (a few seconds) instead of being
-## near-instant - an accepted cost for a large expected battery-life win, since
-## sensor readings only ever need to be fresh as of the moment a button is
-## pressed anyway (not on some background cadence).
+## be observed after the fact. Traded away: the first press after a period of
+## sleep pays a full WiFi-reconnect-from-scratch cost (a few seconds) instead
+## of being near-instant - an accepted cost for a large expected battery-life
+## win, since sensor readings only ever need to be fresh as of the moment a
+## button is pressed anyway (not on some background cadence). After a
+## completed refresh, the device stays awake for a 5-minute idle window
+## (see idle_sleep_timer in script: below) before actually re-entering deep
+## sleep, so a flurry of presses in quick succession only pays that
+## reconnect cost once.
 ####################################################
 
 substitutions:
@@ -410,11 +414,28 @@ script:
           id: refresh_busy
           value: "false"
       # Cycle is fully done (image fetched, panel pushed and finished
-      # refreshing) - go back to sleep. If another button was pressed while
-      # this was running, its own on_press body already ran inline (normal
-      # live GPIO edge, not a deep-sleep wake) and this just re-sleeps once
-      # everything settles instead of lingering awake.
-      - deep_sleep.enter: eink_deep_sleep
+      # refreshing). Rather than sleeping immediately, (re)arm the idle timer
+      # below - gives a grace window for follow-up presses to skip the
+      # WiFi-reconnect-from-scratch cost, since WiFi is already up right now.
+      - script.execute: idle_sleep_timer
+
+  # Restartable idle timer: every completed refresh (see the end of
+  # refresh_display above) calls script.execute on this, which - mode:
+  # restart - cancels any previous countdown still waiting and starts a fresh
+  # one. Net effect: the device sleeps 5 minutes after the *last* refresh, not
+  # a fixed 5 minutes after the first one, so a flurry of presses each gets
+  # the fast (already-connected) path instead of paying reconnect cost every
+  # time. Traded away: staying awake this long costs real battery relative to
+  # sleeping immediately - only worth it if presses tend to cluster.
+  - id: idle_sleep_timer
+    mode: restart
+    then:
+      - delay: 5min
+      - if:
+          condition:
+            lambda: "return !id(refresh_busy);"
+          then:
+            - deep_sleep.enter: eink_deep_sleep
 
 # Safety net for a *genuinely* stuck refresh (as opposed to just a slow one,
 # which the 40s window above already covers): if refresh_busy has been true for
