@@ -34,8 +34,20 @@
 ## (https://github.com/GuySie/random-things), which itself builds on work by
 ## Paul Krischer (https://github.com/SqyD) using the epaper_spi component +
 ## LVGL, including the online_image.set_url pattern used here for dynamic
-## URLs. Simplified/adapted for this project: no numbered-file browsing, no
-## deep sleep (device is USB powered).
+## URLs. Simplified/adapted for this project: no numbered-file browsing.
+##
+## Deep sleep: added after repeated battery-brownout resets were traced back
+## to the device being kept fully awake (WiFi associated, LVGL looping) around
+## the clock even though it's purely on-demand (buttons only, no polling). The
+## device now deep-sleeps between button presses and wakes only via GPIO3/4/5
+## (ext1, see deep_sleep: below) - see on_boot for how it figures out which
+## button caused the wake and replicates that button's normal on_press body,
+## since the actual GPIO edge happened while the CPU was powered off and can't
+## be observed after the fact. Traded away: every press now pays a full
+## WiFi-reconnect-from-scratch cost (a few seconds) instead of being
+## near-instant - an accepted cost for a large expected battery-life win, since
+## sensor readings only ever need to be fresh as of the moment a button is
+## pressed anyway (not on some background cadence).
 ####################################################
 
 substitutions:
@@ -45,6 +57,10 @@ esphome:
   name: eink-photo-frame
   friendly_name: Eink Photo Frame
   min_version: 2025.11.1
+  # esp_sleep_get_wakeup_cause()/esp_sleep_get_ext1_wakeup_status() (used in
+  # on_boot below) come from this IDF header.
+  includes:
+    - esp_sleep.h
   on_boot:
     - priority: -100
       then:
@@ -56,10 +72,79 @@ esphome:
         - globals.set:
             id: refresh_started_at
             value: !lambda "return millis();"
-        - component.update: photo_image
-        # Battery voltage divider - left enabled continuously (see the sensor:
-        # block below) rather than toggled per-reading, to keep this simple.
+        # Battery voltage divider - re-enabled every boot since deep sleep
+        # powers down GPIO state; must happen before the sensor reads just
+        # below, since ADC readings on GPIO1 depend on it.
         - output.turn_on: battery_enable
+        - delay: 200ms
+        # Sensors are on-demand now (update_interval: never, see sensor: block
+        # below) rather than a 60s background timer, since the only thing that
+        # ever needs a reading is "whatever's baked into the panel next time a
+        # button is pressed" - a value can't be more than a few seconds stale
+        # in this design, so there's no need to keep polling while asleep.
+        - component.update: sht4x_sensor
+        - component.update: battery_voltage
+        # Figure out which button (if any) caused this boot. A deep-sleep
+        # wake means the GPIO edge that woke us already happened before the
+        # CPU powered back up, so the normal binary_sensor on_press blocks
+        # below (which detect a live edge) can't see it - this branch
+        # reconstructs "which button" from the ext1 wakeup status bitmask
+        # instead, and manually runs that button's body. esp_sleep_get_ext1_
+        # wakeup_status()'s bitmask uses raw GPIO numbers (BIT(n) for GPIONn),
+        # confirmed against Espressif's own docs - no RTC-channel remapping
+        # needed.
+        - lambda: |-
+            id(wakeup_gpio_mask) = 0;
+            if (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_EXT1) {
+              id(wakeup_gpio_mask) = (uint32_t) esp_sleep_get_ext1_wakeup_status();
+            }
+        - if:
+            condition:
+              lambda: "return id(wakeup_gpio_mask) & (1U << 3);"
+            then:
+              - logger.log: "Woke from deep sleep: green button (GPIO3)"
+              - if:
+                  condition:
+                    lambda: "return id(current_mode) == 0;"
+                  then:
+                    - component.update: photo_image
+                  else:
+                    - component.update: dashboard_image
+            else:
+              - if:
+                  condition:
+                    lambda: "return id(wakeup_gpio_mask) & (1U << 4);"
+                  then:
+                    - logger.log: "Woke from deep sleep: right white button (GPIO4)"
+                    - globals.set: { id: current_mode, value: "1" }
+                    - globals.set:
+                        id: dashboard_index
+                        value: !lambda "return id(dashboard_index) + 1;"
+                    - online_image.set_url:
+                        id: dashboard_image
+                        url: !lambda |-
+                          return "${bridge_url}/dashboard.png?index=" + std::to_string(id(dashboard_index));
+                  else:
+                    - if:
+                        condition:
+                          lambda: "return id(wakeup_gpio_mask) & (1U << 5);"
+                        then:
+                          - logger.log: "Woke from deep sleep: left white button (GPIO5)"
+                          - globals.set: { id: current_mode, value: "0" }
+                          - globals.set:
+                              id: photo_index
+                              value: !lambda "return id(photo_index) + 1;"
+                          - online_image.set_url:
+                              id: photo_image
+                              url: !lambda |-
+                                return "${bridge_url}/photo.png?index=" + std::to_string(id(photo_index));
+                        else:
+                          # Not a button wake at all - real power-on/reset (first
+                          # flash, firmware update, brownout, etc). Same
+                          # behavior as before deep sleep existed: just show
+                          # something.
+                          - logger.log: "Boot was not a button wake - fetching current photo source"
+                          - component.update: photo_image
 
 esp32:
   board: esp32-s3-devkitc-1
@@ -101,14 +186,10 @@ ota:
 wifi:
   ssid: !secret wifi_ssid
   password: !secret wifi_password
-  # Light-touch power saving: lets the radio doze between beacon intervals
-  # instead of staying fully awake at all times. This device is on-demand only
-  # (buttons, no polling), so the odd extra tens-of-ms of WiFi latency on a
-  # button press is not noticeable against the ~31.5s panel refresh anyway.
-  # Deliberately not going further (deep sleep) for now - that would add
-  # real, noticeable latency per button press (wake + reconnect before
-  # anything happens), which is a bigger UX trade-off than this project
-  # wanted to take on right now.
+  # Light-touch power saving while actually awake (between deep-sleep cycles,
+  # see deep_sleep: below) - lets the radio doze between beacon intervals
+  # instead of staying fully awake. Minor next to the reconnect-from-scratch
+  # cost every wake already pays, but free to leave on.
   power_save_mode: light
 
   # Fallback hotspot (captive portal) if WiFi connection fails
@@ -130,6 +211,28 @@ captive_portal:
 
 http_request:
 
+# Wakes only on GPIO3/4/5 (the three buttons) via ext1 - ANY_LOW is only
+# available on ext1-capable chips beyond the original ESP32 (S2/S3/C-series);
+# confirmed available for this board's esp32-s3. No sleep_duration/
+# run_duration set: with both omitted, the device sleeps indefinitely until a
+# wakeup pin fires, and only ever re-enters sleep when something explicitly
+# calls deep_sleep.enter (see the end of the refresh_display script and the
+# image on_error handlers below) - i.e. sleep is fully request-driven, never
+# on a timer.
+#
+# Known risk, not yet confirmed on this specific board: ESP32's RTC domain can
+# drop internal pull-ups on ext1 wakeup pins during the actual sleep (see
+# esphome/esphome#12694 for the same symptom on a different chip), which would
+# read as a floating pin - either spurious/immediate wakeups or failing to
+# stay asleep at all. These pins already run as INPUT_PULLUP binary_sensors
+# below, which is the known workaround, but if either symptom shows up after
+# flashing, the next step is external pull-up resistors on GPIO3/4/5.
+deep_sleep:
+  id: eink_deep_sleep
+  esp32_ext1_wakeup:
+    pins: [GPIO3, GPIO4, GPIO5]
+    mode: ANY_LOW
+
 spi:
   clk_pin: GPIO7
   mosi_pin: GPIO9
@@ -150,8 +253,13 @@ output:
     id: battery_enable
 
 sensor:
+  # update_interval: never on both of these - they're read on demand, once per
+  # wake, from on_boot above (right before figuring out which button woke the
+  # device), rather than on a background timer. A timer wouldn't reliably fire
+  # anyway: the device is typically awake for well under 60s per cycle now.
   - platform: sht4x
-    update_interval: 60s
+    id: sht4x_sensor
+    update_interval: never
     temperature:
       name: "Temperature"
       id: device_temperature
@@ -164,7 +272,7 @@ sensor:
     pin: GPIO1
     id: battery_voltage
     name: "Battery Voltage"
-    update_interval: 60s
+    update_interval: never
     attenuation: 12db
     # Seeed's own reference config for this board: the ADC pin sees half the
     # actual battery voltage through an onboard divider.
@@ -267,6 +375,12 @@ script:
       - globals.set:
           id: refresh_busy
           value: "false"
+      # Cycle is fully done (image fetched, panel pushed and finished
+      # refreshing) - go back to sleep. If another button was pressed while
+      # this was running, its own on_press body already ran inline (normal
+      # live GPIO edge, not a deep-sleep wake) and this just re-sleeps once
+      # everything settles instead of lingering awake.
+      - deep_sleep.enter: eink_deep_sleep
 
 # Safety net for a *genuinely* stuck refresh (as opposed to just a slow one,
 # which the 40s window above already covers): if refresh_busy has been true for
@@ -313,18 +427,31 @@ globals:
     type: uint32_t
     initial_value: '0'
   # Which page is currently active: 0 = photo, 1 = dashboard. Drives what the
-  # green button's "refresh" means.
+  # green button's "refresh" means. restore_value: true so this survives the
+  # deep-sleep cycle between button presses (plain globals don't - deep sleep
+  # powers down RAM, this is ESPHome's flash-backed persistence instead).
   - id: current_mode
     type: int
     initial_value: '0'
+    restore_value: true
   # Monotonically increasing counters, one per category. Never reset/wrapped
   # on-device - the bridge does `index % current_source_count` server-side, so
   # these just need to keep changing on each press, not track an exact source.
+  # restore_value: true for the same reason as current_mode above.
   - id: photo_index
     type: int
     initial_value: '0'
+    restore_value: true
   - id: dashboard_index
     type: int
+    initial_value: '0'
+    restore_value: true
+  # Bitmask from esp_sleep_get_ext1_wakeup_status(), captured once in on_boot
+  # to figure out which button caused a deep-sleep wake. Doesn't need to
+  # survive sleep itself (recomputed fresh every boot), just needs to exist as
+  # a global so the on_boot lambda and the chained if: conditions can share it.
+  - id: wakeup_gpio_mask
+    type: uint32_t
     initial_value: '0'
 
 binary_sensor:
@@ -524,6 +651,10 @@ image:
       - globals.set:
           id: refresh_busy
           value: "false"
+      # Also without this, a failed download would leave the device stuck
+      # awake indefinitely, since deep_sleep.enter otherwise only happens at
+      # the end of a successful refresh_display run.
+      - deep_sleep.enter: eink_deep_sleep
 
   # Dashboard sources (weather, PhotoPrism stats, ...). Fetched on demand only
   # (see button_white_1 above) - no periodic update_interval, so viewing the
@@ -545,3 +676,4 @@ image:
       - globals.set:
           id: refresh_busy
           value: "false"
+      - deep_sleep.enter: eink_deep_sleep
