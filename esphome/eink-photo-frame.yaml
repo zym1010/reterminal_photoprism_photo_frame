@@ -58,9 +58,13 @@ esphome:
   friendly_name: Eink Photo Frame
   min_version: 2025.11.1
   # esp_sleep_get_wakeup_cause()/esp_sleep_get_ext1_wakeup_status() (used in
-  # on_boot below) come from this IDF header.
+  # on_boot below) come from this IDF header. Angle brackets are load-bearing
+  # here: without them ESPHome treats this as a local project file and looks
+  # for it in the config directory (observed error: "Could not find file
+  # '/config/esp_sleep.h'"), instead of emitting a plain #include <esp_sleep.h>
+  # that resolves via the compiler's system include path.
   includes:
-    - esp_sleep.h
+    - <esp_sleep.h>
   on_boot:
     - priority: -100
       then:
