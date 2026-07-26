@@ -200,6 +200,16 @@ api:
 ota:
   - platform: esphome
     password: !secret eink_photo_frame_ota_password
+    # idle_sleep_timer (see script: below) only counts down from the last
+    # completed refresh, not from OTA start - without this flag it would
+    # happily call deep_sleep.enter mid-transfer if an OTA takes longer than
+    # whatever's left of that 5-minute window, cutting power mid-flash.
+    on_begin:
+      - globals.set: { id: ota_in_progress, value: "true" }
+    on_end:
+      - globals.set: { id: ota_in_progress, value: "false" }
+    on_error:
+      - globals.set: { id: ota_in_progress, value: "false" }
 
 wifi:
   ssid: !secret wifi_ssid
@@ -431,6 +441,15 @@ script:
     mode: restart
     then:
       - delay: 5min
+      # An OTA started within the 5-minute window but still running once it
+      # elapses shouldn't get cut off mid-transfer just because this timer's
+      # clock (which only tracks time since the last refresh, not OTA
+      # progress) ran out - wait it out instead of sleeping through it.
+      - while:
+          condition:
+            lambda: "return id(ota_in_progress);"
+          then:
+            - delay: 5s
       - if:
           condition:
             lambda: "return !id(refresh_busy);"
@@ -508,6 +527,14 @@ globals:
   - id: wakeup_gpio_mask
     type: uint32_t
     initial_value: '0'
+  # Set by the ota: on_begin/on_end/on_error triggers above - lets
+  # idle_sleep_timer (see script: below) know not to sleep out from under an
+  # in-progress OTA. No reason to survive a reboot/sleep cycle: an OTA in
+  # flight implies the device is about to reboot into new firmware anyway.
+  - id: ota_in_progress
+    type: bool
+    restore_value: false
+    initial_value: 'false'
 
 binary_sensor:
   # Green button: refresh whatever's currently showing, using its own source's
