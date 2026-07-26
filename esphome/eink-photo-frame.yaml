@@ -68,6 +68,16 @@ esphome:
   on_boot:
     - priority: -100
       then:
+        # Marks this OTA partition valid immediately, rather than waiting on
+        # safe_mode's default 60s "boot_is_good_after" timer. Without this,
+        # every deep-sleep wake (which looks exactly like a reset to the
+        # bootloader) before that timer elapses gets treated as "reset before
+        # being confirmed good", and the bootloader auto-rolls back to the
+        # previous firmware - confirmed via "OTA rollback detected!" in the
+        # logs after a fresh flash, since a full awake cycle here (~43-45s)
+        # is shorter than the 60s default. This is ESPHome's own documented
+        # fix for exactly this "read a sensor then deep sleep" pattern.
+        - safe_mode.mark_successful
         # Extra time for the display to finish initializing (needed since ESPHome 2025.11)
         - delay: 5000ms
         - globals.set:
