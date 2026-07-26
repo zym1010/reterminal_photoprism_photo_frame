@@ -234,7 +234,17 @@ http_request:
 deep_sleep:
   id: eink_deep_sleep
   esp32_ext1_wakeup:
-    pins: [GPIO3, GPIO4, GPIO5]
+    # allow_other_uses: these same 3 pins are also each declared as a
+    # binary_sensor below (for edge detection while the device is awake) -
+    # ESPHome's pin validator treats any pin declared in two places as an
+    # error unless both declarations opt in with this flag.
+    pins:
+      - number: GPIO3
+        allow_other_uses: true
+      - number: GPIO4
+        allow_other_uses: true
+      - number: GPIO5
+        allow_other_uses: true
     mode: ANY_LOW
 
 spi:
@@ -467,6 +477,9 @@ binary_sensor:
       number: GPIO3
       mode: INPUT_PULLUP
       inverted: true
+      # See the matching allow_other_uses comment on deep_sleep's
+      # esp32_ext1_wakeup above - this pin is intentionally shared.
+      allow_other_uses: true
     id: button_green
     name: "Refresh"
     filters:
@@ -502,6 +515,7 @@ binary_sensor:
       number: GPIO4
       mode: INPUT_PULLUP
       inverted: true
+      allow_other_uses: true
     id: button_white_1
     name: "Next Dashboard Source"
     filters:
@@ -546,6 +560,7 @@ binary_sensor:
       number: GPIO5
       mode: INPUT_PULLUP
       inverted: true
+      allow_other_uses: true
     id: button_white_2
     name: "Next Photo Source"
     filters:
