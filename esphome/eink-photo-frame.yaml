@@ -215,6 +215,16 @@ captive_portal:
 
 http_request:
 
+# restore_value: true globals (photo_index/dashboard_index/current_mode, see
+# globals: below) are only actually committed to flash on this interval - the
+# default is a full minute, batched to reduce flash wear. Our entire awake
+# window per press (~45s: init delay + fetch + the refresh_display hold) is
+# usually shorter than that default, so a counter bump could get wiped by
+# deep_sleep.enter before ESPHome ever wrote it to flash (confirmed by
+# testing: state wasn't surviving a sleep cycle before this was added).
+preferences:
+  flash_write_interval: 1s
+
 # Wakes only on GPIO3/4/5 (the three buttons) via ext1 - ANY_LOW is only
 # available on ext1-capable chips beyond the original ESP32 (S2/S3/C-series);
 # confirmed available for this board's esp32-s3. No sleep_duration/
