@@ -121,13 +121,29 @@ esphome:
               lambda: "return id(wakeup_gpio_mask) & (1U << 3);"
             then:
               - logger.log: "Woke from deep sleep: green button (GPIO3)"
+              # Deep sleep clears RAM, so online_image's url has reset to its
+              # compiled-in default (index=0) regardless of what source was
+              # showing before sleep - unlike the GPIO4/GPIO5 branches below,
+              # a plain component.update here would silently re-fetch index=0
+              # instead of "refresh whatever's currently showing" (confirmed
+              # bug: waking on the green button while on a non-zero dashboard
+              # source jumped to index=0 - "weather" - instead of refreshing
+              # the source that was actually on screen). Rebuild the url from
+              # the persisted index first, same as the other two branches, so
+              # set_url's own automatic download re-fetches the right source.
               - if:
                   condition:
                     lambda: "return id(current_mode) == 0;"
                   then:
-                    - component.update: photo_image
+                    - online_image.set_url:
+                        id: photo_image
+                        url: !lambda |-
+                          return "${bridge_url}/photo.png?index=" + std::to_string(id(photo_index));
                   else:
-                    - component.update: dashboard_image
+                    - online_image.set_url:
+                        id: dashboard_image
+                        url: !lambda |-
+                          return "${bridge_url}/dashboard.png?index=" + std::to_string(id(dashboard_index));
             else:
               - if:
                   condition:
