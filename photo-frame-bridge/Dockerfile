@@ -21,10 +21,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends fonts-wqy-micro
 # font-noto-color-emoji cask (used for local dev/testing on macOS) has already
 # moved to the broken COLR format, so this is deliberately pulled from source
 # rather than trusted to whatever a package manager currently ships.
+# Pinned to a commit rather than `main`: upstream removed fonts/ from `main`
+# in Sept 2026 (the URL started 404ing), and a pin also guards against `main`
+# silently switching this file to the broken COLR format. This commit's file
+# is byte-identical to the one in the previously deployed image.
 RUN mkdir -p /usr/share/fonts/truetype/noto \
     && apt-get update && apt-get install -y --no-install-recommends ca-certificates curl \
     && curl -fsSL -o /usr/share/fonts/truetype/noto/NotoColorEmoji.ttf \
-       https://raw.githubusercontent.com/googlefonts/noto-emoji/main/fonts/NotoColorEmoji.ttf \
+       https://raw.githubusercontent.com/googlefonts/noto-emoji/f3ae03f5e9b3b8516fa151f7168159ca1a3e7515/fonts/NotoColorEmoji.ttf \
     && apt-get purge -y --auto-remove curl \
     && rm -rf /var/lib/apt/lists/*
 
