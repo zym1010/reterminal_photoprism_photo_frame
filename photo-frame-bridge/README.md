@@ -162,6 +162,13 @@ height is computed per task (undated tasks take one compact line; dated ones tak
 date) rather than a fixed size, so the mix of undated/dated tasks determines how many actually fit
 on screen - there's no single fixed answer to "how many tasks fit."
 
+The due line is always formatted from the task's due `date` (`due today`, `due tomorrow`,
+`due Nov 20`, `due Dec 1 9:00 AM`, year only if not the current one), not Todoist's free-form due
+`string` - that's whatever was typed when the task was created, so it rendered inconsistently, and
+for recurring tasks it's only the rule ("every 14 days") with no actual date. Recurring tasks get
+the rule appended after the date, e.g. `due tomorrow · every 14 days`. The due line is truncated to
+the column width like the task name.
+
 Requires a personal API token (**Todoist Settings → Integrations → Developer**) set as
 `TODOIST_API_TOKEN`. Without it, the card just says so rather than erroring - a missing/empty
 token is a normal, expected state (e.g. before you've configured it), not a failure.

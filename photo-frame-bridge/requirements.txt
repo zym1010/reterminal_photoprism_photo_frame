@@ -1,5 +1,6 @@
 flask
 requests
 pillow
-epaper-dithering
+# Pinned: 6.x+ dropped ColorPalette, which app.py imports
+epaper-dithering==5.0.9
 pillow-avif-plugin
