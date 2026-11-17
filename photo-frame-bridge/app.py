@@ -651,6 +651,34 @@ def strip_markdown_links(text):
     return MARKDOWN_LINK_RE.sub(r"\1", text)
 
 
+def format_due_text(due, today):
+    """Due-date line for a task, always formatted from `date` rather than
+    Todoist's free-form `string` (which is whatever the user typed - "Nov 20",
+    "tomorrow 9am", "20/11" - so it rendered inconsistently, and for recurring
+    tasks is only the rule, "every 14 days", with no actual due date). Recurring
+    tasks get the rule appended: "due tomorrow · every 14 days".
+
+    `date` is "YYYY-MM-DD" for all-day tasks or "YYYY-MM-DDTHH:MM:SS[Z]" for
+    timed ones; the year is only shown when it isn't the current one.
+    """
+    raw = due.get("date")
+    if not raw:
+        return ""
+    next_date = datetime.strptime(raw[:10], "%Y-%m-%d").date()
+    if next_date == today:
+        when = "today"
+    elif next_date == today + timedelta(days=1):
+        when = "tomorrow"
+    elif next_date.year == today.year:
+        when = next_date.strftime("%b %-d")
+    else:
+        when = next_date.strftime("%b %-d, %Y")
+    if len(raw) > 10:
+        when += datetime.strptime(raw[11:16], "%H:%M").strftime(" %-I:%M %p")
+    rule = due.get("string", "")
+    return f"due {when} · {rule}" if due.get("is_recurring") and rule else f"due {when}"
+
+
 def truncate_mixed_to_width(draw, text, font, emoji_font, emoji_height, max_width):
     if mixed_text_width(draw, text, font, emoji_font, emoji_height) <= max_width:
         return text
@@ -696,7 +724,8 @@ def render_todos_image(tasks):
     row_height_with_due = 56
     row_height_no_due = 32
     index_col_width = 32
-    today_iso = datetime.now(timezone.utc).date().isoformat()
+    today = datetime.now(timezone.utc).date()
+    today_iso = today.isoformat()
 
     # Two columns rather than one, to fit noticeably more tasks per screen -
     # each filled top-to-bottom before moving to the next (like a newspaper),
@@ -736,8 +765,11 @@ def render_todos_image(tasks):
         # ships one weight, no separate bold file.
         draw_mixed_text(img, draw, (text_x, y), text, task_font, emoji_font, color, emoji_height, stroke_width=1)
 
-        if due and due.get("string"):
-            due_text = f"due {due['string']}"
+        due_text = format_due_text(due, today) if due else ""
+        if due_text:
+            # Truncated since the recurring form ("due Nov 18 · every other
+            # Monday") can outgrow a half-width column.
+            due_text = truncate_mixed_to_width(draw, due_text, due_font, emoji_font, emoji_height, max_width)
             due_y = y + 30
             draw.text((text_x, due_y), due_text, font=due_font, fill=(0, 0, 0))
             due_width = draw.textlength(due_text, font=due_font)
